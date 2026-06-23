@@ -1,0 +1,10 @@
+/target/
+/jdk/
+dependency-reduced-pom.xml
+demo/out/
+demo/driver/
+demo/rewritten/
+demo/neg/*.class
+
+# local editor/agent settings
+.claude/
