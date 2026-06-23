@@ -42,13 +42,24 @@ public final class Rewriter {
             s.filter(p -> p.toString().endsWith(".class")).forEach(classes::add);
         }
 
+        // Resolve a superclass's bytes from the input dir so the promoter can
+        // verify an abstract @ValueClass value super class.
+        ValueClassTransformer.SuperResolver resolver = name -> {
+            Path sp = in.resolve(name + ".class");
+            try {
+                return Files.exists(sp) ? Files.readAllBytes(sp) : null;
+            } catch (Exception e) {
+                return null;
+            }
+        };
+
         int strictCount = 0, valueCount = 0;
         for (Path p : classes) {
             byte[] original = Files.readAllBytes(p);
             byte[] result = null;
             // Value-class promotion takes precedence (strict superset rewrite).
             if (valueClass != null) {
-                ValueClassTransformer.Result vc = valueClass.transform(original);
+                ValueClassTransformer.Result vc = valueClass.transform(original, resolver);
                 if (vc.changed()) {
                     valueCount++;
                     System.out.println("[value-class] " + vc.report());

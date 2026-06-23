@@ -26,5 +26,5 @@ echo
 echo "### 4. same via the LOAD-TIME agent (valueclass mode) on the ORIGINAL classes"
 "$JH/bin/javac" -cp "demo/cc-out:$SCALA_LIB" -d demo/cc-out demo/CCDriver.java
 "$JH/bin/java" --enable-preview -Xverify:all \
-  -javaagent:"$JAR=valueclass;verbose;include=Complex,Mixed,WithDouble,Vec2,NotAnnotated,CCDriver" \
+  -javaagent:"$JAR=valueclass;verbose;include=Complex,Mixed,WithDouble,Vec2,NotAnnotated,Shape,Circle,Rect,PlainParent,Derived,CCDriver" \
   -cp "demo/cc-out:$SCALA_LIB" CCDriver 2>&1 | quiet | grep -E "value-class\]|==" | grep -v '\$'

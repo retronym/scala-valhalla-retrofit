@@ -12,3 +12,14 @@ import au.id.zaugg.valhalla.ValueClass
 
 // No annotation -> not promoted (stays an identity class); only strict-init'd.
 final case class NotAnnotated(a: Int, b: Int)
+
+// A value class may extend an abstract @ValueClass "value super class" (which
+// JEP 401 requires to be stateless: zero instance fields).
+@ValueClass sealed abstract class Shape
+@ValueClass final case class Circle(r: Int) extends Shape
+@ValueClass final case class Rect(w: Int, h: Int) extends Shape
+
+// Excluded: superclass carries state and is not @ValueClass, so promoting the
+// subclass would make a value class extend an identity class.
+abstract class PlainParent(val base: Int)
+@ValueClass final case class Derived(x: Int) extends PlainParent(x)

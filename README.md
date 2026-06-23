@@ -175,20 +175,35 @@ import au.id.zaugg.valhalla.ValueClass
 
 @ValueClass final case class Complex(re: Int, im: Int)
 @ValueClass(allowFloating = true) final case class Vec2(x: Double, y: Double)
+
+// A value class may extend an abstract @ValueClass "value super class",
+// which JEP 401 requires to be stateless (zero instance fields):
+@ValueClass sealed abstract class Shape
+@ValueClass final case class Circle(r: Int) extends Shape
+@ValueClass final case class Rect(w: Int, h: Int) extends Shape
 ```
 
 The agent (in `valueclass` mode) promotes an annotated **final class of final
-fields** whose superclass is `Object` and whose fields are all set before
-`super()`, marking *every* field strict. `@ValueClass` is `RUNTIME`-retained so
-the agent reads it from `RuntimeVisibleAnnotations`; the per-type
-`allowFloating` element lifts the `float`/`double` gate for that class only.
-Ineligible or un-annotated classes are left as identity classes (still
-strict-init'd). Verified on the EA JVM:
+fields** whose fields are all set before `super()`, marking *every* field
+strict. `@ValueClass` is `RUNTIME`-retained so the agent reads it from
+`RuntimeVisibleAnnotations`; the per-type `allowFloating` element lifts the
+`float`/`double` gate for that class only.
+
+**Superclass rule (JEP 401).** A value class may only extend `Object` or an
+**abstract `@ValueClass`** class that is itself stateless. On an abstract class
+the annotation marks a *value super class*: it must have zero instance fields
+(the agent verifies this, and resolves a non-`Object` superclass's bytes to
+validate the whole chain up to `Object`). A case class extending a non-annotated
+or stateful parent is therefore excluded — promoting it would make a value class
+extend an identity class. Ineligible or un-annotated classes are left as
+identity classes (still strict-init'd). Verified on the EA JVM:
 
 ```
-Complex(1,2) == Complex(1,2)   -> true    (annotated, promoted: == by state; toString/equals retained)
-Mixed(7,true) == Mixed(7,true) -> true    (Long + Boolean, promoted)
-NotAnnotated(1,2) == (1,2)     -> false   (no @ValueClass: stays an identity class)
+Complex(1,2) == Complex(1,2)   -> true     (annotated, promoted: == by state; toString/equals retained)
+Mixed(7,true) == Mixed(7,true) -> true     (Long + Boolean, promoted)
+Circle(5) == Circle(5)         -> true     (value subtype of the abstract value class Shape)
+NotAnnotated(1,2) == (1,2)     -> false    (no @ValueClass: stays an identity class)
+Derived extends PlainParent    -> skipped  (superclass is not an abstract @ValueClass)
 ```
 
 User code depends only on `valhalla-annotations`; the agent jar pulls in ASM

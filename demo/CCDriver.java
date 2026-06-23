@@ -15,5 +15,11 @@ public class CCDriver {
 
     NotAnnotated n1 = new NotAnnotated(1, 2), n2 = new NotAnnotated(1, 2);
     System.out.println("NotAnnotated(1,2) == (1,2) [identity] : " + (n1 == n2) + "   (no opt-in => identity)");
+
+    // value subclasses of an abstract @ValueClass value super class
+    Shape s = new Circle(5);
+    System.out.println("Circle(5) == Circle(5) [acmp]         : " + (new Circle(5) == new Circle(5))
+        + "   (value subtype of abstract value Shape)");
+    System.out.println("s instanceof Circle                   : " + (s instanceof Circle));
   }
 }

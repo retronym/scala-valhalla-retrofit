@@ -98,7 +98,16 @@ public final class StrictInitAgent {
                 // Value-class promotion (when enabled) takes precedence: it is a
                 // strict superset rewrite for the AnyVal classes it touches.
                 if (valueClass != null) {
-                    ValueClassTransformer.Result vc = valueClass.transform(classfileBuffer);
+                    // Resolve a superclass's bytes from the same loader so the
+                    // agent can verify an abstract @ValueClass value super class.
+                    ValueClassTransformer.SuperResolver resolver = name -> {
+                        try (var in = loader.getResourceAsStream(name + ".class")) {
+                            return in == null ? null : in.readAllBytes();
+                        } catch (Exception e) {
+                            return null;
+                        }
+                    };
+                    ValueClassTransformer.Result vc = valueClass.transform(classfileBuffer, resolver);
                     if (vc.changed()) {
                         if (opts.verbose) System.err.println("[value-class] " + vc.report());
                         return vc.bytes();
