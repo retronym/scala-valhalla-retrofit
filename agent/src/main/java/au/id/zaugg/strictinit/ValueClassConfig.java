@@ -36,26 +36,31 @@ import java.util.Set;
  */
 public final class ValueClassConfig {
 
-    final Set<String> valueClasses;   // internal names to treat as @ValueClass
+    final Set<String> valueClasses;    // internal names to treat as @ValueClass
     final Set<String> finalizeClasses; // internal names to mark ACC_FINAL
+    final Set<String> staticizeInners; // inner-class internal names to mark ACC_STATIC
     final boolean allowNonFinal;
 
-    public ValueClassConfig(Set<String> valueClasses, Set<String> finalizeClasses, boolean allowNonFinal) {
+    public ValueClassConfig(Set<String> valueClasses, Set<String> finalizeClasses,
+                            Set<String> staticizeInners, boolean allowNonFinal) {
         this.valueClasses = Set.copyOf(valueClasses);
         this.finalizeClasses = Set.copyOf(finalizeClasses);
+        this.staticizeInners = Set.copyOf(staticizeInners);
         this.allowNonFinal = allowNonFinal;
     }
 
     public static ValueClassConfig empty() {
-        return new ValueClassConfig(Set.of(), Set.of(), false);
+        return new ValueClassConfig(Set.of(), Set.of(), Set.of(), false);
     }
 
     public boolean isEmpty() {
-        return valueClasses.isEmpty() && finalizeClasses.isEmpty() && !allowNonFinal;
+        return valueClasses.isEmpty() && finalizeClasses.isEmpty()
+                && staticizeInners.isEmpty() && !allowNonFinal;
     }
 
     boolean isValueClass(String internalName) { return valueClasses.contains(internalName); }
     boolean shouldFinalize(String internalName) { return finalizeClasses.contains(internalName); }
+    boolean shouldStaticize(String innerName) { return staticizeInners.contains(innerName); }
 
     /** Parse a comma-separated list of class names (dots or slashes) into
      *  internal names. Nested classes must already use {@code $}. */
@@ -78,6 +83,7 @@ public final class ValueClassConfig {
         return new ValueClassConfig(
                 parseList(props.getProperty("value-class")),
                 parseList(props.getProperty("finalize")),
+                parseList(props.getProperty("staticize-inner")),
                 Boolean.parseBoolean(props.getProperty("allow-non-final", "false")));
     }
 
@@ -87,12 +93,14 @@ public final class ValueClassConfig {
         vc.addAll(other.valueClasses);
         Set<String> fin = new LinkedHashSet<>(finalizeClasses);
         fin.addAll(other.finalizeClasses);
-        return new ValueClassConfig(vc, fin, allowNonFinal || other.allowNonFinal);
+        Set<String> stat = new LinkedHashSet<>(staticizeInners);
+        stat.addAll(other.staticizeInners);
+        return new ValueClassConfig(vc, fin, stat, allowNonFinal || other.allowNonFinal);
     }
 
     @Override
     public String toString() {
         return "value-class=" + valueClasses + " finalize=" + finalizeClasses
-                + " allow-non-final=" + allowNonFinal;
+                + " staticize-inner=" + staticizeInners + " allow-non-final=" + allowNonFinal;
     }
 }

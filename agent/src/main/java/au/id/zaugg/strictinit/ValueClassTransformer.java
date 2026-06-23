@@ -97,19 +97,26 @@ public final class ValueClassTransformer {
     public Result transform(byte[] original, SuperResolver resolver) {
         ClassNode cn = read(original);
 
+        // Staticize configured inner classes first, so a value class no longer
+        // "encloses" them (and the eligibility check sees them as static).
+        boolean staticized = staticizeInnerEntries(cn);
+
         Candidate c = detect(cn);
         boolean finalizeOnly = c == null && config.shouldFinalize(cn.name);
-        if (c == null && !finalizeOnly) return new Result(null, null);
+        if (c == null && !finalizeOnly && !staticized) return new Result(null, null);
 
-        if (finalizeOnly) {
-            // Just add ACC_FINAL (no promotion, no preview bump).
-            if ((cn.access & Opcodes.ACC_FINAL) != 0) {
-                return new Result(null, "finalize " + cn.name + " (already final)");
+        if (c == null) {
+            // No promotion: just finalize and/or staticize at the original version.
+            StringBuilder ops = new StringBuilder();
+            if (finalizeOnly && (cn.access & Opcodes.ACC_FINAL) == 0) {
+                cn.access |= Opcodes.ACC_FINAL;
+                ops.append("finalized");
             }
-            cn.access |= Opcodes.ACC_FINAL;
+            if (staticized) ops.append(ops.length() > 0 ? ", " : "").append("staticized inner(s)");
+            if (ops.length() == 0) return new Result(null, null);
             ClassWriter cw = new ClassWriter(0);
             cn.accept(cw);
-            return new Result(cw.toByteArray(), cn.name + "  -> finalized (added ACC_FINAL)");
+            return new Result(cw.toByteArray(), cn.name + "  -> " + ops);
         }
 
         // Finalize a forgotten-final class before the eligibility check, so a
@@ -276,6 +283,23 @@ public final class ValueClassTransformer {
         return null;
     }
 
+    /** Mark configured inner classes {@code ACC_STATIC} in this class's
+     *  {@code InnerClasses} attribute (e.g. {@code scala.Option$WithFilter}), so a
+     *  value class no longer "encloses" a non-static inner. The inner already
+     *  takes its outer as an explicit constructor argument and holds it in a plain
+     *  field, so no code change is needed. Returns whether anything changed. */
+    private boolean staticizeInnerEntries(ClassNode cn) {
+        if (cn.innerClasses == null || config.staticizeInners.isEmpty()) return false;
+        boolean changed = false;
+        for (org.objectweb.asm.tree.InnerClassNode ic : cn.innerClasses) {
+            if (config.shouldStaticize(ic.name) && (ic.access & Opcodes.ACC_STATIC) == 0) {
+                ic.access |= Opcodes.ACC_STATIC;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
     /** In a value class's {@code InnerClasses} attribute, an identity nested
      *  class must carry {@code ACC_IDENTITY} (verified: javac emits {@code 0x28}
      *  STATIC|IDENTITY for an identity class nested in a value class, and the JVM
@@ -327,6 +351,7 @@ public final class ValueClassTransformer {
             return "superclass " + sup + " not resolvable to verify it is a value super class";
         }
         ClassNode sn = read(b);
+        staticizeInnerEntries(sn); // mirror the staticize the super will receive when promoted
         // The super must itself be a value super: @ValueClass or in the list.
         if (findValueClassAnnotation(sn) == null && !config.isValueClass(sup)) {
             return "superclass " + sup + " is not a value super class"

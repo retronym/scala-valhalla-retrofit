@@ -56,6 +56,7 @@ public final class StrictInitAgent {
             boolean verbose = false, valueClasses = false, allowFloating = false, allowNonFinal = false;
             java.util.Set<String> vcList = new java.util.LinkedHashSet<>();
             java.util.Set<String> finList = new java.util.LinkedHashSet<>();
+            java.util.Set<String> staticList = new java.util.LinkedHashSet<>();
             ValueClassConfig fileConfig = ValueClassConfig.empty();
             if (args != null && !args.isBlank()) {
                 for (String part : args.split(";")) {
@@ -77,6 +78,8 @@ public final class StrictInitAgent {
                                 vcList.addAll(ValueClassConfig.parseList(part.substring("value-class-list=".length())));
                             } else if (part.startsWith("finalize=")) {
                                 finList.addAll(ValueClassConfig.parseList(part.substring("finalize=".length())));
+                            } else if (part.startsWith("staticize-inner=")) {
+                                staticList.addAll(ValueClassConfig.parseList(part.substring("staticize-inner=".length())));
                             } else if (part.startsWith("config=")) {
                                 try {
                                     fileConfig = ValueClassConfig.fromFile(java.nio.file.Path.of(part.substring("config=".length())));
@@ -88,7 +91,7 @@ public final class StrictInitAgent {
                     }
                 }
             }
-            ValueClassConfig config = fileConfig.merge(new ValueClassConfig(vcList, finList, allowNonFinal));
+            ValueClassConfig config = fileConfig.merge(new ValueClassConfig(vcList, finList, staticList, allowNonFinal));
             if (!config.isEmpty()) valueClasses = true; // external config implies promotion
             return new Options(includes, verbose, valueClasses, allowFloating, config);
         }

@@ -228,6 +228,9 @@ takes an external config instead of the annotation. Three mechanisms:
   `final` but I know it has no subclasses" case: finalize, then promote.
 - **allow-non-final** — a blanket mode that skips the not-final gate (promotion
   finalizes anyway), as an alternative to listing each class.
+- **staticize-inner** — convert a non-static inner class to static (flip
+  `ACC_STATIC` on its `InnerClasses` entries everywhere), so its enclosing class
+  is no longer blocked from becoming a value class.
 
 Via a `.properties` file ([config/scala-stdlib.conf](config/scala-stdlib.conf))
 or inline agent options:
@@ -247,6 +250,18 @@ promotes what is genuinely sound and **gates the rest with a precise reason**:
 scala.util.Either -> abstract value class;  Left/Right -> value classes   (Left(e)==Left(e) is true)
 scala.Option / scala.Some -> skipped   (Option encloses the non-static inner WithFilter)
 Range / Range.Inclusive / .Exclusive  -> skipped   (Range has instance fields; a value super must be stateless)
+```
+
+`scala.Option`/`Some` *become* promotable once `Option$WithFilter` is converted
+to a static inner with **staticize-inner** — `WithFilter` already takes its outer
+`Option` as an explicit constructor argument, so flipping `ACC_STATIC` on its
+`InnerClasses` entries needs no code change. With that, `Option` becomes an
+abstract value super and `Some` a value class; a `for`-comprehension guard (which
+compiles to `Option.withFilter`) still works:
+
+```
+-javaagent:strict-init-retrofit.jar=valueclass;value-class-list=scala.Option,scala.Some;staticize-inner=scala.Option$WithFilter
+-> Some(1) == Some(1) is true;  `for (x <- Some(21) if x > 0) yield x*2` -> Some(42)
 ```
 
 Two JEP 401 constraints the validator enforces (both verified against the EA
