@@ -12,3 +12,6 @@ demo/cc-rw/
 
 # local editor/agent settings
 .claude/
+demo/cfg-slib/
+demo/cfg-rw/
+demo/cfg-driver/

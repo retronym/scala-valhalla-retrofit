@@ -69,10 +69,16 @@ public final class ValueClassTransformer {
     }
 
     private final boolean allowFloating;
+    private final ValueClassConfig config;
     private final StrictInitTransformer strict = new StrictInitTransformer(false);
 
     public ValueClassTransformer(boolean allowFloating) {
+        this(allowFloating, ValueClassConfig.empty());
+    }
+
+    public ValueClassTransformer(boolean allowFloating, ValueClassConfig config) {
         this.allowFloating = allowFloating;
+        this.config = config;
     }
 
     public record Result(byte[] bytes, String report) {
@@ -92,7 +98,27 @@ public final class ValueClassTransformer {
         ClassNode cn = read(original);
 
         Candidate c = detect(cn);
-        if (c == null) return new Result(null, null);
+        boolean finalizeOnly = c == null && config.shouldFinalize(cn.name);
+        if (c == null && !finalizeOnly) return new Result(null, null);
+
+        if (finalizeOnly) {
+            // Just add ACC_FINAL (no promotion, no preview bump).
+            if ((cn.access & Opcodes.ACC_FINAL) != 0) {
+                return new Result(null, "finalize " + cn.name + " (already final)");
+            }
+            cn.access |= Opcodes.ACC_FINAL;
+            ClassWriter cw = new ClassWriter(0);
+            cn.accept(cw);
+            return new Result(cw.toByteArray(), cn.name + "  -> finalized (added ACC_FINAL)");
+        }
+
+        // Finalize a forgotten-final class before the eligibility check, so a
+        // listed leaf passes the "must be final" gate.
+        boolean finalized = false;
+        if (!c.isAbstract && (cn.access & Opcodes.ACC_FINAL) == 0 && config.shouldFinalize(cn.name)) {
+            cn.access |= Opcodes.ACC_FINAL;
+            finalized = true;
+        }
 
         String why = ineligibilityReason(cn, c, resolver);
         if (why != null) {
@@ -106,13 +132,15 @@ public final class ValueClassTransformer {
         if (!c.isAbstract) {
             cn.access |= Opcodes.ACC_FINAL;    // concrete value classes are final; abstract ones stay abstract
         }
+        markInnerClassIdentity(cn);            // identity nested classes need ACC_IDENTITY inside a value class
         cn.version = (PREVIEW_MINOR << 16) | PREVIEW_MAJOR;
 
         ClassWriter cw = new ClassWriter(0);
         cn.accept(cw);
 
         String report = cn.name + "  -> " + (c.isAbstract ? "abstract " : "") + "value class ["
-                + c.kind + "] (cleared ACC_IDENTITY)"
+                + c.kind + "] (cleared ACC_IDENTITY"
+                + (finalized ? ", finalized" : "") + ")"
                 + (c.fields.isEmpty() ? "" : "; strict fields " + names(c.fields))
                 + "; minor=0x" + Integer.toHexString(PREVIEW_MINOR) + " major=" + PREVIEW_MAJOR;
         return new Result(cw.toByteArray(), report);
@@ -128,6 +156,11 @@ public final class ValueClassTransformer {
         if (ann != null) {
             String kind = isAbstract ? "@ValueClass abstract" : "@ValueClass";
             return new Candidate(instanceFields(cn), kind, readAllowFloating(ann), isAbstract);
+        }
+        // Externally configured (classes we cannot annotate, e.g. stdlib types).
+        if (config.isValueClass(cn.name)) {
+            String kind = isAbstract ? "config abstract" : "config";
+            return new Candidate(instanceFields(cn), kind, allowFloating, isAbstract);
         }
         FieldNode underlying = detectAnyVal(cn); // always concrete + final
         if (underlying != null) {
@@ -191,71 +224,122 @@ public final class ValueClassTransformer {
     // from detection because a mis-promotion silently imposes value semantics.
     // ------------------------------------------------------------------
     String ineligibilityReason(ClassNode cn, Candidate c, SuperResolver resolver) {
+        return ineligibilityReason(cn, c, resolver, new HashSet<>());
+    }
+
+    private String ineligibilityReason(ClassNode cn, Candidate c, SuperResolver resolver, Set<String> visited) {
+        // A value class can neither enclose nor be a non-static inner member class
+        // (an enclosing value instance has no identity to capture). Verified:
+        // ClassFormatError otherwise (e.g. scala.Option's WithFilter).
+        String innerWhy = innerClassIneligibility(cn);
+        if (innerWhy != null) return innerWhy;
+
         if (c.isAbstract) {
             // A value super class must be stateless (verified: javac rejects an
             // instance field on an abstract value class). It stays abstract.
             if (!c.fields.isEmpty()) {
-                return "abstract @ValueClass must have zero instance fields "
+                return "abstract value class must have zero instance fields "
                         + "(a value super class is stateless), found " + names(c.fields);
             }
-        } else {
-            if ((cn.access & Opcodes.ACC_FINAL) == 0) {
-                return "class is not final";
+            return superIneligibility(cn, resolver, visited);
+        }
+
+        if ((cn.access & Opcodes.ACC_FINAL) == 0 && !config.allowNonFinal) {
+            return "class is not final (assert no subclasses via the finalize list or allow-non-final)";
+        }
+        // Super chain before the no-fields check, so a leaf with a stateful parent
+        // (e.g. Range.Inclusive) reports the real reason, not "no instance fields".
+        String superWhy = superIneligibility(cn, resolver, visited);
+        if (superWhy != null) return superWhy;
+        if (c.fields.isEmpty()) {
+            return "no instance fields to make strict";
+        }
+        boolean floatingOk = allowFloating || c.allowFloatingOverride;
+        for (FieldNode f : c.fields) {
+            if ((f.access & Opcodes.ACC_FINAL) == 0) {
+                return "non-final field " + f.name + " (value-class fields must be final)";
             }
-            if (c.fields.isEmpty()) {
-                return "no instance fields to make strict";
-            }
-            boolean floatingOk = allowFloating || c.allowFloatingOverride;
-            for (FieldNode f : c.fields) {
-                if ((f.access & Opcodes.ACC_FINAL) == 0) {
-                    return "non-final field " + f.name + " (value-class fields must be final)";
-                }
-                if (!floatingOk && (f.desc.equals("D") || f.desc.equals("F"))) {
-                    return "floating-point field " + f.name + ":" + f.desc
-                            + " (acmp flips NaN/signed-zero; opt in with allowFloating)";
-                }
-            }
-            // Every field must be provably set before super() -- reuse the sound
-            // strict-init instance analysis. (A body val set after super fails
-            // here, correctly: such a class cannot be an all-strict value class.)
-            StrictInitTransformer.Selection sel = strict.analyze(cn);
-            for (FieldNode f : c.fields) {
-                if (!sel.instanceFields().contains(key(f.name, f.desc))) {
-                    return "field " + f.name + " not provably set before super()";
-                }
+            if (!floatingOk && (f.desc.equals("D") || f.desc.equals("F"))) {
+                return "floating-point field " + f.name + ":" + f.desc
+                        + " (acmp flips NaN/signed-zero; opt in with allowFloating)";
             }
         }
-        // Shared: a value class may only extend Object or an abstract @ValueClass
-        // value super class, validated up the whole chain.
-        return superIneligibility(cn, resolver, new HashSet<>());
+        // Every field must be provably set before super() -- reuse the sound
+        // strict-init instance analysis. (A body val set after super fails here,
+        // correctly: such a class cannot be an all-strict value class.)
+        StrictInitTransformer.Selection sel = strict.analyze(cn);
+        for (FieldNode f : c.fields) {
+            if (!sel.instanceFields().contains(key(f.name, f.desc))) {
+                return "field " + f.name + " not provably set before super()";
+            }
+        }
+        return null;
     }
 
-    /** Null if {@code cn}'s superclass chain is value-compatible (every level is
-     *  {@code Object} or an abstract, stateless, {@code @ValueClass} class). */
+    /** In a value class's {@code InnerClasses} attribute, an identity nested
+     *  class must carry {@code ACC_IDENTITY} (verified: javac emits {@code 0x28}
+     *  STATIC|IDENTITY for an identity class nested in a value class, and the JVM
+     *  rejects the entry otherwise). The class itself, and any nested class also
+     *  being promoted, stay value (no identity bit). */
+    private void markInnerClassIdentity(ClassNode cn) {
+        if (cn.innerClasses == null) return;
+        for (org.objectweb.asm.tree.InnerClassNode ic : cn.innerClasses) {
+            boolean willBeValue = ic.name.equals(cn.name) || config.isValueClass(ic.name);
+            if (willBeValue) {
+                ic.access &= ~ACC_IDENTITY;
+            } else {
+                ic.access |= ACC_IDENTITY;
+            }
+        }
+    }
+
+    /** A value class may not enclose, or be, a non-static inner member class. */
+    private String innerClassIneligibility(ClassNode cn) {
+        if (cn.innerClasses == null) return null;
+        for (org.objectweb.asm.tree.InnerClassNode ic : cn.innerClasses) {
+            boolean member = ic.innerName != null && ic.outerName != null;
+            boolean nonStatic = (ic.access & Opcodes.ACC_STATIC) == 0;
+            if (!member || !nonStatic) continue;
+            if (cn.name.equals(ic.outerName)) {
+                return "encloses non-static inner member class " + ic.name
+                        + " (a value class cannot capture an enclosing value instance)";
+            }
+            if (cn.name.equals(ic.name)) {
+                return "is a non-static inner member class of " + ic.outerName;
+            }
+        }
+        return null;
+    }
+
+    /** Null if {@code cn}'s superclass chain is value-compatible: every level is
+     *  {@code Object} or an abstract value super class that itself fully passes
+     *  eligibility (resolved via {@code resolver}). */
     private String superIneligibility(ClassNode cn, SuperResolver resolver, Set<String> visited) {
         String sup = cn.superName;
         if (sup == null || "java/lang/Object".equals(sup)) return null;
         if (!visited.add(sup)) return null; // cycle guard (cannot occur in valid bytecode)
         if (resolver == null) {
             return "non-Object superclass " + sup
-                    + " (no resolver to verify it is an abstract @ValueClass)";
+                    + " (no resolver to verify it is an abstract value super class)";
         }
         byte[] b = resolver.bytes(sup);
         if (b == null) {
-            return "superclass " + sup + " not resolvable to verify it is an abstract @ValueClass";
+            return "superclass " + sup + " not resolvable to verify it is a value super class";
         }
         ClassNode sn = read(b);
+        // The super must itself be a value super: @ValueClass or in the list.
+        if (findValueClassAnnotation(sn) == null && !config.isValueClass(sup)) {
+            return "superclass " + sup + " is not a value super class"
+                    + " (annotate it @ValueClass or add it to the value-class list)";
+        }
         if ((sn.access & Opcodes.ACC_ABSTRACT) == 0) {
-            return "superclass " + sup
-                    + " is not abstract (a value class may only extend Object or an abstract @ValueClass)";
+            return "superclass " + sup + " is not abstract (a value super class must be abstract)";
         }
-        if (findValueClassAnnotation(sn) == null) {
-            return "superclass " + sup + " is not @ValueClass-annotated";
-        }
-        if (!instanceFields(sn).isEmpty()) {
-            return "superclass " + sup + " has instance fields (a value super class must be stateless)";
-        }
-        return superIneligibility(sn, resolver, visited); // validate the rest of the chain
+        // Recursively validate the super exactly as if we were promoting it (its
+        // own inner classes, statelessness and super chain) -- so a leaf is only
+        // promoted when its whole ancestry will actually be promoted too.
+        Candidate superC = new Candidate(instanceFields(sn), "super", false, true);
+        return ineligibilityReason(sn, superC, resolver, visited);
     }
 
     private static ClassNode read(byte[] bytes) {

@@ -20,22 +20,32 @@ public final class Rewriter {
 
     public static void main(String[] args) throws Exception {
         List<String> positional = new ArrayList<>();
-        boolean valueClasses = false, allowFloating = false;
-        for (String a : args) {
+        boolean valueClasses = false, allowFloating = false, allowNonFinal = false;
+        java.util.Set<String> vcList = new java.util.LinkedHashSet<>();
+        java.util.Set<String> finList = new java.util.LinkedHashSet<>();
+        ValueClassConfig fileConfig = ValueClassConfig.empty();
+        for (int i = 0; i < args.length; i++) {
+            String a = args[i];
             switch (a) {
                 case "--value-classes" -> valueClasses = true;
                 case "--allow-floating" -> { valueClasses = true; allowFloating = true; }
+                case "--allow-non-final" -> { valueClasses = true; allowNonFinal = true; }
+                case "--value-classes-list" -> { valueClasses = true; vcList.addAll(ValueClassConfig.parseList(args[++i])); }
+                case "--finalize" -> { valueClasses = true; finList.addAll(ValueClassConfig.parseList(args[++i])); }
+                case "--config" -> { valueClasses = true; fileConfig = ValueClassConfig.fromFile(Path.of(args[++i])); }
                 default -> positional.add(a);
             }
         }
         if (positional.isEmpty()) {
-            System.err.println("usage: Rewriter [--value-classes] [--allow-floating] <classesDir> [outDir]");
+            System.err.println("usage: Rewriter [--value-classes] [--allow-floating] [--allow-non-final]"
+                    + " [--value-classes-list a,b] [--finalize a,b] [--config file] <classesDir> [outDir]");
             System.exit(2);
         }
         Path in = Path.of(positional.get(0));
         Path out = positional.size() > 1 ? Path.of(positional.get(1)) : in;
+        ValueClassConfig config = fileConfig.merge(new ValueClassConfig(vcList, finList, allowNonFinal));
         StrictInitTransformer strict = new StrictInitTransformer(true);
-        ValueClassTransformer valueClass = valueClasses ? new ValueClassTransformer(allowFloating) : null;
+        ValueClassTransformer valueClass = valueClasses ? new ValueClassTransformer(allowFloating, config) : null;
 
         List<Path> classes = new ArrayList<>();
         try (Stream<Path> s = Files.walk(in)) {

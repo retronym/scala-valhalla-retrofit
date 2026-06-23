@@ -215,6 +215,47 @@ Derived extends PlainParent    -> skipped  (superclass is not an abstract @Value
 User code depends only on `valhalla-annotations`; the agent jar pulls in ASM
 but reads the annotation by descriptor, so the two are decoupled.
 
+## Retrofitting classes you cannot annotate (config)
+
+For library types you can't edit — `scala.util.Left`/`Right`, etc. — the agent
+takes an external config instead of the annotation. Three mechanisms:
+
+- **value-class list** — internal names treated exactly as `@ValueClass`. A
+  concrete entry is promoted; an **abstract** entry becomes a stateless *value
+  super class*. List a leaf's abstract super here too (the JVM forbids a value
+  class from extending an identity class).
+- **finalize list** — add `ACC_FINAL` to named classes. The "the author forgot
+  `final` but I know it has no subclasses" case: finalize, then promote.
+- **allow-non-final** — a blanket mode that skips the not-final gate (promotion
+  finalizes anyway), as an alternative to listing each class.
+
+Via a `.properties` file ([config/scala-stdlib.conf](config/scala-stdlib.conf))
+or inline agent options:
+
+```
+-javaagent:strict-init-retrofit.jar=valueclass;config=config/scala-stdlib.conf
+-javaagent:strict-init-retrofit.jar=valueclass;value-class-list=scala.util.Either,scala.util.Left,scala.util.Right
+# offline:
+Rewriter --config config/scala-stdlib.conf <classes> <out>
+Rewriter --value-classes-list a,b --finalize a,b --allow-non-final <classes> <out>
+```
+
+Running this against the real `scala-library` is instructive — the agent only
+promotes what is genuinely sound and **gates the rest with a precise reason**:
+
+```
+scala.util.Either -> abstract value class;  Left/Right -> value classes   (Left(e)==Left(e) is true)
+scala.Option / scala.Some -> skipped   (Option encloses the non-static inner WithFilter)
+Range / Range.Inclusive / .Exclusive  -> skipped   (Range has instance fields; a value super must be stateless)
+```
+
+Two JEP 401 constraints the validator enforces (both verified against the EA
+JVM, then gated rather than producing an unloadable class): a value class may
+only extend `Object` or an abstract **stateless** value super class (checked up
+the whole chain), and a value class may **not enclose a non-static inner member
+class**. When promoting, the agent also fixes `InnerClasses` flags so identity
+nested classes carry `ACC_IDENTITY`, as javac does.
+
 ## Benchmarks
 
 JMH benchmarks ([benchmarks/](benchmarks/README.md)) compare promoted value
@@ -254,6 +295,7 @@ mvn -DskipTests package          # builds annotations + agent + benchmarks
 ./demo/run.sh                     # phase 0: scalac -> agent -> preview JVM, + negative test
 ./demo/run-value-classes.sh       # phase 1: promote AnyVal -> value class, offline + agent
 ./demo/run-case-classes.sh        # phase 2: @ValueClass case classes -> value class
+./demo/run-config-classes.sh      # config: promote stdlib Either/Left/Right (no annotation)
 ./benchmarks/run.sh               # JMH: value vs reference, allocation profiler
 ```
 

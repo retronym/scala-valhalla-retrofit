@@ -43,15 +43,20 @@ public final class StrictInitAgent {
                 + " major=" + StrictInitTransformer.PREVIEW_MAJOR
                 + (opts.valueClasses ? "; value-class promotion ON"
                         + (opts.allowFloating ? " (incl. floating)" : " (float/double gated)") : "")
+                + (opts.config.isEmpty() ? "" : "; config[" + opts.config + "]")
                 + (opts.includes.isEmpty() ? "; include=<all>" : "; include=" + opts.includes));
         inst.addTransformer(new Transformer(opts), true);
     }
 
     private record Options(List<String> includes, boolean verbose,
-                           boolean valueClasses, boolean allowFloating) {
+                           boolean valueClasses, boolean allowFloating,
+                           ValueClassConfig config) {
         static Options parse(String args) {
             List<String> includes = List.of();
-            boolean verbose = false, valueClasses = false, allowFloating = false;
+            boolean verbose = false, valueClasses = false, allowFloating = false, allowNonFinal = false;
+            java.util.Set<String> vcList = new java.util.LinkedHashSet<>();
+            java.util.Set<String> finList = new java.util.LinkedHashSet<>();
+            ValueClassConfig fileConfig = ValueClassConfig.empty();
             if (args != null && !args.isBlank()) {
                 for (String part : args.split(";")) {
                     part = part.trim();
@@ -60,6 +65,7 @@ public final class StrictInitAgent {
                         case "verbose" -> verbose = true;
                         case "valueclass", "valueclasses" -> valueClasses = true;
                         case "allow-floating" -> allowFloating = true;
+                        case "allow-non-final" -> allowNonFinal = true;
                         default -> {
                             if (part.startsWith("include=")) {
                                 String v = part.substring("include=".length());
@@ -67,12 +73,24 @@ public final class StrictInitAgent {
                                         .map(s -> s.trim().replace('.', '/'))
                                         .filter(s -> !s.isEmpty())
                                         .toList();
+                            } else if (part.startsWith("value-class-list=")) {
+                                vcList.addAll(ValueClassConfig.parseList(part.substring("value-class-list=".length())));
+                            } else if (part.startsWith("finalize=")) {
+                                finList.addAll(ValueClassConfig.parseList(part.substring("finalize=".length())));
+                            } else if (part.startsWith("config=")) {
+                                try {
+                                    fileConfig = ValueClassConfig.fromFile(java.nio.file.Path.of(part.substring("config=".length())));
+                                } catch (Exception e) {
+                                    System.err.println("[strict-init] could not load config: " + e);
+                                }
                             }
                         }
                     }
                 }
             }
-            return new Options(includes, verbose, valueClasses, allowFloating);
+            ValueClassConfig config = fileConfig.merge(new ValueClassConfig(vcList, finList, allowNonFinal));
+            if (!config.isEmpty()) valueClasses = true; // external config implies promotion
+            return new Options(includes, verbose, valueClasses, allowFloating, config);
         }
     }
 
@@ -84,7 +102,7 @@ public final class StrictInitAgent {
         Transformer(Options opts) {
             this.opts = opts;
             this.strict = new StrictInitTransformer(opts.verbose);
-            this.valueClass = opts.valueClasses ? new ValueClassTransformer(opts.allowFloating) : null;
+            this.valueClass = opts.valueClasses ? new ValueClassTransformer(opts.allowFloating, opts.config) : null;
         }
 
         @Override
