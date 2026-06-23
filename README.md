@@ -79,7 +79,7 @@ Load-time agent:
 
 ```
 java --enable-preview \
-     -javaagent:target/strict-init-retrofit.jar="include=Obj,A,B;verbose" \
+     -javaagent:agent/target/strict-init-retrofit.jar="include=Obj,A,B;verbose" \
      -cp <app> MainClass
 ```
 
@@ -91,7 +91,7 @@ Offline post-processor (rewrite a classes dir, then inspect with `javap` /
 re-verify with `-Xverify:all`):
 
 ```
-java -cp target/strict-init-retrofit.jar \
+java -cp agent/target/strict-init-retrofit.jar \
      au.id.zaugg.strictinit.Rewriter [--value-classes] [--allow-floating] <classesDir> [outDir]
 ```
 
@@ -121,13 +121,51 @@ Money(100) == Money(100) -> true    (Long-backed, promoted)
 Ratio(1.5) == Ratio(1.5) -> false   (Double-backed: gated, still an identity class)
 ```
 
+## Phase 2: opting case classes in with `@ValueClass`
+
+Multi-field promotion is **opt-in**, because dropping identity on an arbitrary
+class is not always sound. The `valhalla-annotations` module (a tiny,
+dependency-free runtime jar) provides the marker:
+
+```scala
+import au.id.zaugg.valhalla.ValueClass
+
+@ValueClass final case class Complex(re: Int, im: Int)
+@ValueClass(allowFloating = true) final case class Vec2(x: Double, y: Double)
+```
+
+The agent (in `valueclass` mode) promotes an annotated **final class of final
+fields** whose superclass is `Object` and whose fields are all set before
+`super()`, marking *every* field strict. `@ValueClass` is `RUNTIME`-retained so
+the agent reads it from `RuntimeVisibleAnnotations`; the per-type
+`allowFloating` element lifts the `float`/`double` gate for that class only.
+Ineligible or un-annotated classes are left as identity classes (still
+strict-init'd). Verified on the EA JVM:
+
+```
+Complex(1,2) == Complex(1,2)   -> true    (annotated, promoted: == by state; toString/equals retained)
+Mixed(7,true) == Mixed(7,true) -> true    (Long + Boolean, promoted)
+NotAnnotated(1,2) == (1,2)     -> false   (no @ValueClass: stays an identity class)
+```
+
+User code depends only on `valhalla-annotations`; the agent jar pulls in ASM
+but reads the annotation by descriptor, so the two are decoupled.
+
 ## Build & demo
 
 ```
-mvn -DskipTests package          # builds the shaded agent jar
+mvn -DskipTests package          # builds valhalla-annotations + the shaded agent jar
 ./demo/run.sh                     # phase 0: scalac -> agent -> preview JVM, + negative test
 ./demo/run-value-classes.sh       # phase 1: promote AnyVal -> value class, offline + agent
+./demo/run-case-classes.sh        # phase 2: @ValueClass case classes -> value class
 ```
+
+## Modules
+
+- `annotations/` — `au.id.zaugg:valhalla-annotations`, the dependency-free opt-in
+  annotation library for user code.
+- `agent/` — `au.id.zaugg:strict-init-retrofit`, the shaded load-time / build-time
+  agent (also runnable offline via `Rewriter`).
 
 The demo expects the JEP 401 EA JDK at `jdk/jdk-27.jdk/Contents/Home` (override
 with `JAVA_HOME_PREVIEW`) and `cs` (coursier) on `PATH` for the Scala library.

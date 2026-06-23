@@ -1,4 +1,4 @@
-/target/
+target/
 /jdk/
 dependency-reduced-pom.xml
 demo/out/
@@ -7,6 +7,8 @@ demo/rewritten/
 demo/neg/*.class
 demo/vc-out/
 demo/vc-rw/
+demo/cc-out/
+demo/cc-rw/
 
 # local editor/agent settings
 .claude/

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>au.id.zaugg</groupId>
+    <artifactId>valhalla-retrofit-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>valhalla-annotations</artifactId>
+  <packaging>jar</packaging>
+
+  <name>valhalla-annotations</name>
+  <description>
+    Tiny dependency-free runtime library: opt-in annotations that mark Scala
+    final classes of final fields (e.g. case classes) for translation into JEP
+    401 value classes by the retrofit agent. No dependencies; safe to put on
+    user code's compile and runtime classpath.
+  </description>
+</project>

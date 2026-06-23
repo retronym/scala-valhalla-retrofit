@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 JH="${JAVA_HOME_PREVIEW:-jdk/jdk-27.jdk/Contents/Home}"
-JAR=target/strict-init-retrofit.jar
+JAR=agent/target/strict-init-retrofit.jar
 SCALA_LIB="$(cs fetch org.scala-lang:scala3-library_3:3.7.0 2>/dev/null | tr '\n' ':')"
 quiet() { grep -v -E "WARNING|reporting|will be removed|Unsafe::" || true; }
 
