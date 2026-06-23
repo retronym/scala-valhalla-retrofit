@@ -84,21 +84,49 @@ java --enable-preview \
 ```
 
 Agent options (`;`-separated): `include=<prefix,prefix>` (internal names; `.` or
-`/` accepted; default = all non-bootstrap classes), `verbose`.
+`/` accepted; default = all non-bootstrap classes), `verbose`,
+`valueclass` (enable Phase-1 value-class promotion, below), `allow-floating`.
 
 Offline post-processor (rewrite a classes dir, then inspect with `javap` /
 re-verify with `-Xverify:all`):
 
 ```
 java -cp target/strict-init-retrofit.jar \
-     au.id.zaugg.strictinit.Rewriter <classesDir> [outDir]
+     au.id.zaugg.strictinit.Rewriter [--value-classes] [--allow-floating] <classesDir> [outDir]
+```
+
+## Phase 1: promoting `extends AnyVal` to real value classes
+
+With `valueclass` / `--value-classes`, the agent also promotes an *erased* Scala
+`extends AnyVal` value class to a JEP 401 `value class`. The rewrite clears
+`ACC_IDENTITY` (0x0020) on the class — a value class is exactly a class *without*
+that bit (`final value class` = `0x0010`, vs a normal class's `0x0021`) — marks
+the single underlying field strict+final, and stamps the preview version.
+
+`AnyVal` is not a real superclass after erasure (the backend rewrites it to
+`java/lang/Object` and the name survives nowhere), so detection is structural:
+the SIP-15 `$extension` fingerprint — a `public static name$extension(<underlying>,
+…)` method whose first parameter is the underlying field's type. See
+[docs/value-class-mapping.md](docs/value-class-mapping.md).
+
+**Floating-point underlyings are gated out by default.** Value `==`/acmp is
+bitwise substitutability, which *inverts* `NaN` (acmp says `NaN == NaN`) and
+signed-zero (acmp says `+0.0 != -0.0`) relative to Scala numeric `==`. Pass
+`allow-floating` / `--allow-floating` to override, accepting the changed
+semantics. Result, verified on the EA JVM (two distinct allocations):
+
+```
+UserId(5) == UserId(5)   -> true    (Int-backed, promoted: == is by state)
+Money(100) == Money(100) -> true    (Long-backed, promoted)
+Ratio(1.5) == Ratio(1.5) -> false   (Double-backed: gated, still an identity class)
 ```
 
 ## Build & demo
 
 ```
 mvn -DskipTests package          # builds the shaded agent jar
-./demo/run.sh                     # scalac -> agent -> preview JVM, + negative test
+./demo/run.sh                     # phase 0: scalac -> agent -> preview JVM, + negative test
+./demo/run-value-classes.sh       # phase 1: promote AnyVal -> value class, offline + agent
 ```
 
 The demo expects the JEP 401 EA JDK at `jdk/jdk-27.jdk/Contents/Home` (override

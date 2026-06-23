@@ -5,6 +5,8 @@ demo/out/
 demo/driver/
 demo/rewritten/
 demo/neg/*.class
+demo/vc-out/
+demo/vc-rw/
 
 # local editor/agent settings
 .claude/

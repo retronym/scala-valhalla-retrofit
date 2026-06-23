@@ -72,14 +72,27 @@ public final class StrictInitTransformer {
      * @return a {@link Result} whose {@code bytes} are non-null only if at least
      *         one field was marked strict.
      */
+    /** The strict-init-eligible fields of a class, partitioned by kind. */
+    public record Selection(Set<String> staticFields, Set<String> instanceFields) {
+        public boolean isEmpty() { return staticFields.isEmpty() && instanceFields.isEmpty(); }
+    }
+
+    /** Run the (sound, conservative) selection without mutating anything. Shared
+     *  with {@link ValueClassTransformer}, which needs to confirm a field is
+     *  safely strict-markable before promoting its class to a value class. */
+    public Selection analyze(ClassNode cn) {
+        return new Selection(selectStaticFields(cn), selectInstanceFields(cn));
+    }
+
     public Result transform(byte[] original) {
         ClassNode cn = new ClassNode();
         new ClassReader(original).accept(cn, 0); // preserve frames/code verbatim
 
-        Set<String> staticTargets = selectStaticFields(cn);
-        Set<String> instanceTargets = selectInstanceFields(cn);
+        Selection sel = analyze(cn);
+        Set<String> staticTargets = sel.staticFields();
+        Set<String> instanceTargets = sel.instanceFields();
 
-        if (staticTargets.isEmpty() && instanceTargets.isEmpty()) {
+        if (sel.isEmpty()) {
             return new Result(null, null);
         }
 
@@ -293,5 +306,5 @@ public final class StrictInitTransformer {
         return null;
     }
 
-    private static String key(String name, String desc) { return name + ":" + desc; }
+    static String key(String name, String desc) { return name + ":" + desc; }
 }

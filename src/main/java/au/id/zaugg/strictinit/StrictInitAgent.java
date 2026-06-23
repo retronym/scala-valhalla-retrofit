@@ -41,40 +41,50 @@ public final class StrictInitAgent {
         System.err.println("[strict-init] agent active; preview minor=0x"
                 + Integer.toHexString(StrictInitTransformer.PREVIEW_MINOR)
                 + " major=" + StrictInitTransformer.PREVIEW_MAJOR
+                + (opts.valueClasses ? "; value-class promotion ON"
+                        + (opts.allowFloating ? " (incl. floating)" : " (float/double gated)") : "")
                 + (opts.includes.isEmpty() ? "; include=<all>" : "; include=" + opts.includes));
         inst.addTransformer(new Transformer(opts), true);
     }
 
-    private record Options(List<String> includes, boolean verbose) {
+    private record Options(List<String> includes, boolean verbose,
+                           boolean valueClasses, boolean allowFloating) {
         static Options parse(String args) {
             List<String> includes = List.of();
-            boolean verbose = false;
+            boolean verbose = false, valueClasses = false, allowFloating = false;
             if (args != null && !args.isBlank()) {
                 for (String part : args.split(";")) {
                     part = part.trim();
                     if (part.isEmpty()) continue;
-                    if (part.equals("verbose")) {
-                        verbose = true;
-                    } else if (part.startsWith("include=")) {
-                        String v = part.substring("include=".length());
-                        includes = Arrays.stream(v.split(","))
-                                .map(s -> s.trim().replace('.', '/'))
-                                .filter(s -> !s.isEmpty())
-                                .toList();
+                    switch (part) {
+                        case "verbose" -> verbose = true;
+                        case "valueclass", "valueclasses" -> valueClasses = true;
+                        case "allow-floating" -> allowFloating = true;
+                        default -> {
+                            if (part.startsWith("include=")) {
+                                String v = part.substring("include=".length());
+                                includes = Arrays.stream(v.split(","))
+                                        .map(s -> s.trim().replace('.', '/'))
+                                        .filter(s -> !s.isEmpty())
+                                        .toList();
+                            }
+                        }
                     }
                 }
             }
-            return new Options(includes, verbose);
+            return new Options(includes, verbose, valueClasses, allowFloating);
         }
     }
 
     private static final class Transformer implements ClassFileTransformer {
         private final Options opts;
-        private final StrictInitTransformer engine;
+        private final StrictInitTransformer strict;
+        private final ValueClassTransformer valueClass;
 
         Transformer(Options opts) {
             this.opts = opts;
-            this.engine = new StrictInitTransformer(opts.verbose);
+            this.strict = new StrictInitTransformer(opts.verbose);
+            this.valueClass = opts.valueClasses ? new ValueClassTransformer(opts.allowFloating) : null;
         }
 
         @Override
@@ -85,7 +95,19 @@ public final class StrictInitAgent {
                 if (loader == null) return null;            // skip bootstrap/system classes
                 if (!included(className)) return null;
 
-                StrictInitTransformer.Result r = engine.transform(classfileBuffer);
+                // Value-class promotion (when enabled) takes precedence: it is a
+                // strict superset rewrite for the AnyVal classes it touches.
+                if (valueClass != null) {
+                    ValueClassTransformer.Result vc = valueClass.transform(classfileBuffer);
+                    if (vc.changed()) {
+                        if (opts.verbose) System.err.println("[value-class] " + vc.report());
+                        return vc.bytes();
+                    } else if (opts.verbose && vc.report() != null) {
+                        System.err.println("[value-class] " + vc.report());
+                    }
+                }
+
+                StrictInitTransformer.Result r = strict.transform(classfileBuffer);
                 if (!r.changed()) return null;
                 if (opts.verbose && r.report() != null) {
                     System.err.println("[strict-init] " + r.report());

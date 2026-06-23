@@ -104,7 +104,7 @@ Because mis-detection would silently impose value semantics (identity loss, acmp
 ## Phasing
 
 - **Phase 0 — strict-init retrofit (this repo, done).** Mandatory groundwork: value classes require strict fields. Already retrofits `ACC_STRICT_INIT` onto the exact constructor shape value classes need.
-- **Phase 1 — bytecode promotion of `AnyVal` value classes.** Same form factor as the strict-init agent: a load-time / build-time classfile rewrite that marks an eligible erased `AnyVal` class as a `value class` (set the value-class flag, fields strict-final, class final, drop identity affordances), then verify on the EA JVM. No scalac change.
+- **Phase 1 — bytecode promotion of `AnyVal` value classes (implemented; `ValueClassTransformer`).** Same form factor as the strict-init agent: a load-time / build-time rewrite that promotes an eligible erased `AnyVal` class to a `value class` by **clearing `ACC_IDENTITY` (0x0020)** — a value class is exactly a class without that bit (verified: `final value class` = `0x0010`, identity class = `0x0021`) — plus marking the underlying field strict+final and stamping the preview version. Floating-point underlyings gated out by default (opt-in `allow-floating`). Verified on the EA JVM: promoted Int/Long wrappers compare `==` by state, the gated `Double` wrapper retains identity. No scalac change.
 - **Phase 2 — eligible case classes (multi-field).** Extend the eligibility analysis and rewrite to N-field structural types.
 - **Phase 3 — frontend support in scalac.** Emit value classes directly, model identity-freedom in the type system, integrate `opaque type`, and adopt null-restricted / implicitly-constructible types for real heap and `Array[V]` flattening once those JEPs land.
 
