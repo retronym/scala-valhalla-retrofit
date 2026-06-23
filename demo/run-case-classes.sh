@@ -4,15 +4,9 @@
 #   ./demo/run-case-classes.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
-
-JH="${JAVA_HOME_PREVIEW:-jdk/jdk-27.jdk/Contents/Home}"
-JAR=agent/target/strict-init-retrofit.jar
-ANN="$(echo annotations/target/valhalla-annotations-*.jar)"
-SCALA_LIB="$(cs fetch org.scala-lang:scala3-library_3:3.7.0 2>/dev/null | tr '\n' ':')"
-quiet() { grep -v -E "WARNING|reporting|will be removed|Unsafe::" || true; }
-
-[ -f "$JAR" ] || { echo "build first: mvn -DskipTests package"; exit 1; }
-[ -f "$ANN" ] || { echo "build first: mvn -DskipTests package"; exit 1; }
+source demo/common.sh
+require_preview_jdk; require_tools; require_built; require_annotations
+SCALA_LIB="$(scala_lib)"
 
 echo "### 1. compile @ValueClass-annotated case classes against valhalla-annotations"
 rm -rf demo/cc-out demo/cc-rw && mkdir -p demo/cc-out

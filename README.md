@@ -1,9 +1,48 @@
-# strict-init-retrofit
+# scala-valhalla-retrofit
 
-A load-time Java agent that retrofits **`ACC_STRICT_INIT`** (JEP 401 strict field
-initialization) onto Scala bytecode that is *already* in the correct shape, so a
-preview JVM enforces the invariant natively. No runtime helpers — it only flips
-flags on fields that already satisfy the invariant.
+> Retrofit Project Valhalla's JEP 401 — **strict field initialization** *and*
+> **value classes** — onto ordinary Scala bytecode, so a preview JVM enforces
+> Valhalla semantics natively. No source changes, no runtime helpers: the
+> transform only flips access-flag bits on classes/fields that already satisfy
+> the invariant and stamps the preview classfile version.
+
+## Executive summary
+
+Scala already emits bytecode that *happens* to satisfy several Valhalla
+invariants — module/`val` statics are assigned in `<clinit>`, constructor param
+accessors are written before `super()`, `AnyVal` wrappers and case classes are
+immutable. This project ships a small ASM-based agent (usable load-time **or**
+build-time) plus a tiny dependency-free opt-in annotation library that turn that
+latent compliance into the real thing, in three layered phases:
+
+- **Phase 0 — strict fields.** Set `ACC_STRICT_INIT` (`0x0800`) on static and
+  pre-`super()` instance fields that are provably assigned, so the JVM verifies
+  and enforces them. Zero StackMapTable work for the supported shapes.
+- **Phase 1 — `AnyVal` → value class.** Detect an *erased* `extends AnyVal`
+  class (structurally — `AnyVal` is not a real superclass after erasure) and
+  clear `ACC_IDENTITY` to make it a real `value class`.
+- **Phase 2 — `@ValueClass` case classes → value class.** An opt-in annotation
+  promotes a final case class of final fields, marking every field strict.
+
+Everything is verified end-to-end on the JEP 401 EA JDK under `-Xverify:all`:
+strict fields are enforced (a field set after `super()` fails with `VerifyError`),
+and promoted value classes compare `==` **by state**. The transform is
+deliberately minimal and **sound** — a wrong mark fails loudly at load, never
+silently — and floating-point fields are gated by default because value-class
+`==` (acmp) inverts `NaN`/signed-zero relative to numeric `==`. See
+[docs/value-class-mapping.md](docs/value-class-mapping.md) for the full mapping,
+the `equals`/`hashCode`/`toString` gap analysis, and the detection design.
+
+## Prerequisites
+
+- **A JEP 401 early-access "Valhalla" JDK — required to run anything here.** The
+  retrofit stamps preview classfiles (value classes / strict fields) that only
+  such a build will load. Download one from **<https://jdk.java.net/valhalla/>**,
+  then either extract it to `./jdk/` (the demos' default lookup path) or set
+  `JAVA_HOME_PREVIEW` to its home directory. The demo scripts and the Maven build
+  fail fast with this link if a suitable JDK is missing.
+- **JDK 21+ to build** the agent (any vendor; enforced by maven-enforcer).
+- **Scala 3 (`scalac`) and coursier (`cs`)** on `PATH` for the demos.
 
 ## Why
 

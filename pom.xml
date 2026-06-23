@@ -33,4 +33,41 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <asm.version>9.10.1</asm.version>
   </properties>
+
+  <build>
+    <!-- Inherited by both modules: fail fast with a clear message if the build
+         JDK is too old. (The agent jar targets 21; RUNNING the demos additionally
+         needs a JEP 401 EA build from https://jdk.java.net/valhalla/ — see the
+         README prerequisites.) -->
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <id>enforce-build-prerequisites</id>
+            <goals><goal>enforce</goal></goals>
+            <configuration>
+              <rules>
+                <requireJavaVersion>
+                  <version>[21,)</version>
+                  <message>
+                    This project requires JDK 21 or newer to BUILD.
+                    To RUN the demos against JEP 401 (value classes / strict field
+                    initialization) you also need an early-access "Valhalla" build:
+                    download it from https://jdk.java.net/valhalla/ and point
+                    JAVA_HOME_PREVIEW at it (see the README prerequisites).
+                  </message>
+                </requireJavaVersion>
+                <requireMavenVersion>
+                  <version>[3.8,)</version>
+                </requireMavenVersion>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
 </project>
