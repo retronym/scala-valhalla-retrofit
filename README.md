@@ -1,5 +1,11 @@
 # scala-valhalla-retrofit
 
+> [!WARNING]
+> **🧪 Experimental.** A proof-of-concept that depends on a preview JEP 401
+> early-access JDK whose classfile encoding may change without notice. Not for
+> production use — APIs, flags, and on-disk classfile shapes can change at any
+> time. Pin a specific EA build and expect breakage on upgrades.
+
 > Retrofit Project Valhalla's JEP 401 — **strict field initialization** *and*
 > **value classes** — onto ordinary Scala bytecode, so a preview JVM enforces
 > Valhalla semantics natively. No source changes, no runtime helpers: the
