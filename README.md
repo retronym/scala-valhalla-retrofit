@@ -217,22 +217,35 @@ but reads the annotation by descriptor, so the two are decoupled.
 
 ## Benchmarks
 
-JMH benchmarks ([benchmarks/](benchmarks/README.md)) compare a promoted value
-class against an identical reference `case class`, wiring the agent into the
+JMH benchmarks ([benchmarks/](benchmarks/README.md)) compare promoted value
+classes against identical reference `case class`es, wiring the agent into the
 forked JVM at load time and reading `gc.alloc.rate.norm` from the built-in
 allocation profiler:
 
 ```
-./benchmarks/run.sh               # -prof gc, value vs reference, three scenarios
+./benchmarks/run.sh               # -prof gc, value vs reference
+./benchmarks/run.sh CursorBench   # the immutable-cursor idiom (the headline win)
 ```
 
-The honest current result on the EA build: where escape analysis already wins
-(no escape) the value class **matches** it (≈0 B/op); where the object escapes (a
-non-inlined call, or an array) the value object is **buffered** and here larger,
-so it allocates *more*. JEP 401 delivers identity removal and on-stack
-scalarization but **not** a scalarized value calling convention or array/heap
-flattening — those need the follow-on null-restricted JEPs. See the
-[benchmarks README](benchmarks/README.md) for the table and interpretation.
+The headline is the **immutable-cursor idiom** from the JEP 401 JDK PR — iterate
+by producing a *new* cursor each step (`c = c.advance()`) instead of mutating an
+iterator. As a value class the cursor scalarizes across the loop, so a full
+traversal allocates **nothing**, matching a mutable iterator while staying
+immutable; the identical *reference* cursor allocates one object per step
+(escape analysis cannot eliminate it across the loop back-edge):
+
+```
+cursor_value     -> ~0 B/op     (immutable value class: scalarized, zero-alloc)
+cursor_ref       -> 24024 B/op  (immutable reference class: a cursor per step)
+iterator_mutable -> ~0 B/op     (classic mutable iterator, EA-eliminated)
+```
+
+The companion `PointBench` shows the limits: where the value *escapes* (passed
+across a non-inlined call, or stored in an array) JEP 401 has no scalarized
+calling convention or array/heap flattening yet, so the value object is buffered
+— and here larger — and allocates *more*. JEP 401 delivers identity removal and
+on-stack scalarization; flattening awaits the follow-on null-restricted JEPs. See
+the [benchmarks README](benchmarks/README.md) for the full tables.
 
 ## Build & demo
 

@@ -21,6 +21,6 @@ BENCH=benchmarks/target/benchmarks.jar
 # Forked JVMs get --enable-preview and the agent in valueclass mode; the include
 # filter limits promotion to VPoint (RPoint is left as a plain reference class).
 "$JH/bin/java" --enable-preview -jar "$BENCH" \
-  -jvmArgsAppend "--enable-preview -javaagent:$AGENT=valueclass;include=au.id.zaugg.bench.VPoint" \
+  -jvmArgsAppend "--enable-preview -javaagent:$AGENT=valueclass;include=au.id.zaugg.bench.VPoint,au.id.zaugg.bench.VCursor" \
   -prof gc \
   "$@"
