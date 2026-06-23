@@ -49,7 +49,7 @@ Against what Scala emits today — case-class `equals` is `instanceof` + per-fie
 | Scala construct | Target | Notes |
 |---|---|---|
 | `class M(val u: T) extends AnyVal` | `value class` (1 strict field) | The 1:1 case. The *boxed* form becomes a value object; the JIT scalarizes the boxes Scala can't currently elide. |
-| `case class C(a: A, b: B)` — immutable, identity-free | `value class` (N strict fields) | The multi-field target. `AnyVal` allows only one field; case classes are where flattening of several fields pays off. |
+| `case class C(a: A, b: B)` — all-`val`, identity-free | `value class` (N strict fields) | The multi-field target. `AnyVal` allows only one field; case classes are where flattening of several fields pays off. Not *every* case class qualifies — a `var` param, a body `var`, or mutable inherited state is excluded by the eligibility filter. |
 | `opaque type O = U` | **leave as `U`** by default | Already optimal. Only promote to a `value class` when the program needs a *runtime* type (reflection / pattern match / overloading) — rare and opt-in. |
 | plain `final` class, all-`val`, no identity use | opportunistic `value class` | Same eligibility test as case classes; needs intent confirmation. |
 

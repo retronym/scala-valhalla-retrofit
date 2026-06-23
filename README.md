@@ -10,10 +10,14 @@
 
 Scala already emits bytecode that *happens* to satisfy several Valhalla
 invariants — module/`val` statics are assigned in `<clinit>`, constructor param
-accessors are written before `super()`, `AnyVal` wrappers and case classes are
-immutable. This project ships a small ASM-based agent (usable load-time **or**
-build-time) plus a tiny dependency-free opt-in annotation library that turn that
-latent compliance into the real thing, in three layered phases:
+accessors are written before `super()`, and `AnyVal` wrappers (plus many case
+classes) are effectively final with only `val` fields. This project ships a
+small ASM-based agent (usable load-time **or** build-time) plus a tiny
+dependency-free opt-in annotation library that turn that latent compliance into
+the real thing, in three layered phases. Where the invariant does *not* hold —
+a `var` param, a `var` introduced in the body, or mutable inherited state — the
+eligibility filter detects it (no non-`final` field, `Object` superclass, every
+field set before `super()`) and leaves the class alone:
 
 - **Phase 0 — strict fields.** Set `ACC_STRICT_INIT` (`0x0800`) on static and
   pre-`super()` instance fields that are provably assigned, so the JVM verifies
