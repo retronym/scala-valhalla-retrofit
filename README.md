@@ -215,13 +215,33 @@ Derived extends PlainParent    -> skipped  (superclass is not an abstract @Value
 User code depends only on `valhalla-annotations`; the agent jar pulls in ASM
 but reads the annotation by descriptor, so the two are decoupled.
 
+## Benchmarks
+
+JMH benchmarks ([benchmarks/](benchmarks/README.md)) compare a promoted value
+class against an identical reference `case class`, wiring the agent into the
+forked JVM at load time and reading `gc.alloc.rate.norm` from the built-in
+allocation profiler:
+
+```
+./benchmarks/run.sh               # -prof gc, value vs reference, three scenarios
+```
+
+The honest current result on the EA build: where escape analysis already wins
+(no escape) the value class **matches** it (≈0 B/op); where the object escapes (a
+non-inlined call, or an array) the value object is **buffered** and here larger,
+so it allocates *more*. JEP 401 delivers identity removal and on-stack
+scalarization but **not** a scalarized value calling convention or array/heap
+flattening — those need the follow-on null-restricted JEPs. See the
+[benchmarks README](benchmarks/README.md) for the table and interpretation.
+
 ## Build & demo
 
 ```
-mvn -DskipTests package          # builds valhalla-annotations + the shaded agent jar
+mvn -DskipTests package          # builds annotations + agent + benchmarks
 ./demo/run.sh                     # phase 0: scalac -> agent -> preview JVM, + negative test
 ./demo/run-value-classes.sh       # phase 1: promote AnyVal -> value class, offline + agent
 ./demo/run-case-classes.sh        # phase 2: @ValueClass case classes -> value class
+./benchmarks/run.sh               # JMH: value vs reference, allocation profiler
 ```
 
 ## Modules
@@ -230,6 +250,8 @@ mvn -DskipTests package          # builds valhalla-annotations + the shaded agen
   annotation library for user code.
 - `agent/` — `au.id.zaugg:strict-init-retrofit`, the shaded load-time / build-time
   agent (also runnable offline via `Rewriter`).
+- `benchmarks/` — `au.id.zaugg:valhalla-benchmarks`, JMH allocation benchmarks
+  (value class vs reference case class).
 
 The demo expects the JEP 401 EA JDK at `jdk/jdk-27.jdk/Contents/Home` (override
 with `JAVA_HOME_PREVIEW`) and `cs` (coursier) on `PATH` for the Scala library.
