@@ -97,39 +97,39 @@ public final class ValueClassTransformer {
     public Result transform(byte[] original, SuperResolver resolver) {
         ClassNode cn = read(original);
 
-        // Staticize configured inner classes first, so a value class no longer
-        // "encloses" them (and the eligibility check sees them as static).
-        boolean staticized = staticizeInnerEntries(cn);
-
         Candidate c = detect(cn);
-        boolean finalizeOnly = c == null && config.shouldFinalize(cn.name);
-        if (c == null && !finalizeOnly && !staticized) return new Result(null, null);
-
-        if (c == null) {
-            // No promotion: just finalize and/or staticize at the original version.
-            StringBuilder ops = new StringBuilder();
-            if (finalizeOnly && (cn.access & Opcodes.ACC_FINAL) == 0) {
-                cn.access |= Opcodes.ACC_FINAL;
-                ops.append("finalized");
-            }
-            if (staticized) ops.append(ops.length() > 0 ? ", " : "").append("staticized inner(s)");
-            if (ops.length() == 0) return new Result(null, null);
-            ClassWriter cw = new ClassWriter(0);
-            cn.accept(cw);
-            return new Result(cw.toByteArray(), cn.name + "  -> " + ops);
-        }
 
         // Finalize a forgotten-final class before the eligibility check, so a
         // listed leaf passes the "must be final" gate.
         boolean finalized = false;
-        if (!c.isAbstract && (cn.access & Opcodes.ACC_FINAL) == 0 && config.shouldFinalize(cn.name)) {
+        if (c != null && !c.isAbstract && (cn.access & Opcodes.ACC_FINAL) == 0
+                && config.shouldFinalize(cn.name)) {
             cn.access |= Opcodes.ACC_FINAL;
             finalized = true;
         }
 
-        String why = ineligibilityReason(cn, c, resolver);
-        if (why != null) {
-            return new Result(null, "skip value-class " + cn.name + " [" + c.kind + "] (" + why + ")");
+        String why = c == null ? "not a value class" : ineligibilityReason(cn, c, resolver);
+        boolean willPromote = c != null && why == null;
+
+        // Transparently fix InnerClasses flags so identity nested classes of a
+        // value class carry ACC_IDENTITY, as javac does. Applies to the class
+        // being promoted AND to any class whose entry names a value class as the
+        // outer (so a value class's own nested classes -- e.g.
+        // scala.Option$WithFilter -- are fixed even though they are not promoted).
+        boolean innerFixed = fixInnerClassIdentity(cn, willPromote);
+
+        if (!willPromote) {
+            if (c != null) { // detected but ineligible
+                return new Result(null, "skip value-class " + cn.name + " [" + c.kind + "] (" + why + ")");
+            }
+            // Not a value class: maybe just finalize and/or fix inner flags, at the
+            // original classfile version (no preview bump).
+            if (!finalized && !innerFixed) return new Result(null, null);
+            ClassWriter cw = new ClassWriter(0);
+            cn.accept(cw);
+            String ops = (finalized ? "finalized" : "") + (finalized && innerFixed ? ", " : "")
+                    + (innerFixed ? "fixed nested-class identity flags" : "");
+            return new Result(cw.toByteArray(), cn.name + "  -> " + ops);
         }
 
         for (FieldNode f : c.fields) {
@@ -139,7 +139,6 @@ public final class ValueClassTransformer {
         if (!c.isAbstract) {
             cn.access |= Opcodes.ACC_FINAL;    // concrete value classes are final; abstract ones stay abstract
         }
-        markInnerClassIdentity(cn);            // identity nested classes need ACC_IDENTITY inside a value class
         cn.version = (PREVIEW_MINOR << 16) | PREVIEW_MAJOR;
 
         ClassWriter cw = new ClassWriter(0);
@@ -235,12 +234,10 @@ public final class ValueClassTransformer {
     }
 
     private String ineligibilityReason(ClassNode cn, Candidate c, SuperResolver resolver, Set<String> visited) {
-        // A value class can neither enclose nor be a non-static inner member class
-        // (an enclosing value instance has no identity to capture). Verified:
-        // ClassFormatError otherwise (e.g. scala.Option's WithFilter).
-        String innerWhy = innerClassIneligibility(cn);
-        if (innerWhy != null) return innerWhy;
-
+        // Note: a non-static inner member class is fine -- javac compiles one
+        // inside a value class without complaint; the identity nested class just
+        // needs ACC_IDENTITY in its InnerClasses entry, which fixInnerClassIdentity
+        // applies transparently.
         if (c.isAbstract) {
             // A value super class must be stateless (verified: javac rejects an
             // instance field on an abstract value class). It stays abstract.
@@ -283,56 +280,32 @@ public final class ValueClassTransformer {
         return null;
     }
 
-    /** Mark configured inner classes {@code ACC_STATIC} in this class's
-     *  {@code InnerClasses} attribute (e.g. {@code scala.Option$WithFilter}), so a
-     *  value class no longer "encloses" a non-static inner. The inner already
-     *  takes its outer as an explicit constructor argument and holds it in a plain
-     *  field, so no code change is needed. Returns whether anything changed. */
-    private boolean staticizeInnerEntries(ClassNode cn) {
-        if (cn.innerClasses == null || config.staticizeInners.isEmpty()) return false;
+    /** Identity nested classes of a value class must carry {@code ACC_IDENTITY}
+     *  in the {@code InnerClasses} attribute (verified: javac emits {@code 0x20}
+     *  IDENTITY for a non-static, and {@code 0x28} STATIC|IDENTITY for a static
+     *  identity class nested in a value class; the JVM rejects the entry — e.g.
+     *  {@code scala.Option$WithFilter} at {@code 0x1} — otherwise). We apply this
+     *  transparently: an entry's inner is fixed when its <em>outer</em> is a value
+     *  class — the class being promoted ({@code cnIsValueClass}), or any class in
+     *  the value-class list — so a value class's own nested classes are fixed even
+     *  though they are not themselves promoted. Returns whether anything changed. */
+    private boolean fixInnerClassIdentity(ClassNode cn, boolean cnIsValueClass) {
+        if (cn.innerClasses == null) return false;
         boolean changed = false;
         for (org.objectweb.asm.tree.InnerClassNode ic : cn.innerClasses) {
-            if (config.shouldStaticize(ic.name) && (ic.access & Opcodes.ACC_STATIC) == 0) {
-                ic.access |= Opcodes.ACC_STATIC;
+            boolean innerIsValue = ic.name.equals(cn.name) ? cnIsValueClass : config.isValueClass(ic.name);
+            if (innerIsValue) {
+                if ((ic.access & ACC_IDENTITY) != 0) { ic.access &= ~ACC_IDENTITY; changed = true; }
+                continue;
+            }
+            boolean outerIsValue = (cnIsValueClass && cn.name.equals(ic.outerName))
+                    || config.isValueClass(ic.outerName);
+            if (outerIsValue && (ic.access & ACC_IDENTITY) == 0) {
+                ic.access |= ACC_IDENTITY;
                 changed = true;
             }
         }
         return changed;
-    }
-
-    /** In a value class's {@code InnerClasses} attribute, an identity nested
-     *  class must carry {@code ACC_IDENTITY} (verified: javac emits {@code 0x28}
-     *  STATIC|IDENTITY for an identity class nested in a value class, and the JVM
-     *  rejects the entry otherwise). The class itself, and any nested class also
-     *  being promoted, stay value (no identity bit). */
-    private void markInnerClassIdentity(ClassNode cn) {
-        if (cn.innerClasses == null) return;
-        for (org.objectweb.asm.tree.InnerClassNode ic : cn.innerClasses) {
-            boolean willBeValue = ic.name.equals(cn.name) || config.isValueClass(ic.name);
-            if (willBeValue) {
-                ic.access &= ~ACC_IDENTITY;
-            } else {
-                ic.access |= ACC_IDENTITY;
-            }
-        }
-    }
-
-    /** A value class may not enclose, or be, a non-static inner member class. */
-    private String innerClassIneligibility(ClassNode cn) {
-        if (cn.innerClasses == null) return null;
-        for (org.objectweb.asm.tree.InnerClassNode ic : cn.innerClasses) {
-            boolean member = ic.innerName != null && ic.outerName != null;
-            boolean nonStatic = (ic.access & Opcodes.ACC_STATIC) == 0;
-            if (!member || !nonStatic) continue;
-            if (cn.name.equals(ic.outerName)) {
-                return "encloses non-static inner member class " + ic.name
-                        + " (a value class cannot capture an enclosing value instance)";
-            }
-            if (cn.name.equals(ic.name)) {
-                return "is a non-static inner member class of " + ic.outerName;
-            }
-        }
-        return null;
     }
 
     /** Null if {@code cn}'s superclass chain is value-compatible: every level is
@@ -351,7 +324,6 @@ public final class ValueClassTransformer {
             return "superclass " + sup + " not resolvable to verify it is a value super class";
         }
         ClassNode sn = read(b);
-        staticizeInnerEntries(sn); // mirror the staticize the super will receive when promoted
         // The super must itself be a value super: @ValueClass or in the list.
         if (findValueClassAnnotation(sn) == null && !config.isValueClass(sup)) {
             return "superclass " + sup + " is not a value super class"

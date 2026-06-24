@@ -145,12 +145,13 @@ to load:
   numeric `==`; off by default, opt in per type or globally;
 - a non-`Object` superclass that isn't an abstract **stateless** value super
   (checked recursively up the whole chain) — a value class may not extend an
-  identity class;
-- enclosing a **non-static inner member class** — an enclosing value instance has
-  no identity to capture.
+  identity class.
 
-When promoting, the agent also fixes `InnerClasses` flags so identity nested
-classes carry `ACC_IDENTITY`, exactly as javac does.
+Nested classes are handled transparently: an identity class nested in a value
+class must carry `ACC_IDENTITY` in its `InnerClasses` entry (javac emits `0x20`
+for a non-static, `0x28` for a static one). The agent applies that automatically
+— so a value class may keep a non-static inner class (e.g. `scala.Option`'s
+`WithFilter`), exactly as javac allows.
 
 ## Retrofitting library classes you can't annotate
 
@@ -164,8 +165,6 @@ file or inline options) instead of the annotation:
   `final` but I know it has no subclasses" — finalize, then promote.
 - **allow-non-final** — a blanket version of the above that skips the not-final
   gate (promotion finalizes anyway).
-- **staticize-inner** — convert a named non-static inner class to static (flip
-  `ACC_STATIC` on its `InnerClasses` entries), unblocking its enclosing class.
 
 ```
 -javaagent:strict-init-retrofit.jar=valueclass;config=config/scala-stdlib.conf
@@ -178,19 +177,19 @@ Pointed at the real `scala-library`, it promotes what is genuinely sound and
 gives a precise reason for the rest:
 
 ```
-scala.util.Either -> abstract value super;  Left/Right -> value classes   (Left(e)==Left(e) is true)
-Range / Range.Inclusive / .Exclusive        -> skipped   (Range is stateful; a value super must be stateless)
-scala.Option / scala.Some                   -> skipped   (Option encloses the non-static inner WithFilter)
+scala.util.Either / scala.Option -> abstract value supers;  Left/Right/Some -> value classes
+Range / Range.Inclusive / .Exclusive  -> skipped   (Range is stateful; a value super must be stateless)
 ```
 
-That last one is fixable: `Option$WithFilter` already takes its outer `Option` as
-an explicit constructor argument, so converting it to a static inner needs no code
-change — just `staticize-inner=scala.Option$WithFilter`. With that, `Option`
-becomes an abstract value super and `Some` a value class, and a `for`-comprehension
-guard (which compiles to `Option.withFilter`) still works:
+`Option`/`Some` promote even though `Option` has a *non-static* inner class
+(`WithFilter`). That isn't actually a value-class restriction — javac compiles a
+non-static inner inside a value class fine — it just requires the identity nested
+class to carry `ACC_IDENTITY` in its `InnerClasses` entry. The agent **fixes that
+automatically** (matching javac), so a `for`-comprehension guard (which compiles
+to `Option.withFilter`) still works with `WithFilter` left non-static:
 
 ```
-value-class-list=scala.Option,scala.Some;staticize-inner=scala.Option$WithFilter
+value-class-list=scala.Option,scala.Some
 -> Some(1) == Some(1) is true;  `for (x <- Some(21) if x > 0) yield x*2` -> Some(42)
 ```
 
@@ -207,7 +206,7 @@ java --enable-preview \
 Agent options (`;`-separated): `include=<prefix,…>` (internal names; `.` or `/`,
 default = all non-bootstrap classes), `verbose`, `valueclass` (enable value-class
 promotion), `allow-floating`, `allow-non-final`, `value-class-list=…`,
-`finalize=…`, `staticize-inner=…`, `config=<file>`.
+`finalize=…`, `config=<file>`.
 
 Offline post-processor (rewrite a classes dir, then inspect with `javap` /
 re-verify with `-Xverify:all`):
@@ -215,8 +214,8 @@ re-verify with `-Xverify:all`):
 ```
 java -cp agent/target/strict-init-retrofit.jar au.id.zaugg.strictinit.Rewriter \
      [--value-classes] [--allow-floating] [--allow-non-final] \
-     [--value-classes-list a,b] [--finalize a,b] [--staticize-inner a,b] \
-     [--config file] <classesDir> [outDir]
+     [--value-classes-list a,b] [--finalize a,b] [--config file] \
+     <classesDir> [outDir]
 ```
 
 ## Benchmarks

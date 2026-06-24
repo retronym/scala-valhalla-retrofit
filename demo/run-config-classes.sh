@@ -45,14 +45,15 @@ EOF
 "$JH/bin/java" --enable-preview -Xverify:all -cp "demo/cfg-rw:demo/cfg-driver" EitherDriver 2>&1 | quiet
 
 echo
-echo "### 4. special-case: staticize Option\$WithFilter so Option/Some promote too"
-echo "        (load-time agent + narrow include; a for-comprehension exercises WithFilter)"
+echo "### 4. Option/Some promote too (Option\$WithFilter's nested-class identity flags"
+echo "        are fixed transparently; load-time agent + narrow include; a"
+echo "        for-comprehension exercises the non-static WithFilter inner class)"
 SCALA3="$(cs fetch org.scala-lang:scala3-library_3:3.7.0 2>/dev/null | tr '\n' ':')"
 cat > demo/cfg-driver/SomeFor.scala <<'EOF'
 object SomeFor {
   def main(args: Array[String]): Unit = {
     val r = for { x <- Some(21) if x > 0 } yield x * 2   // -> Option.withFilter -> WithFilter
-    println(s"for-comprehension guard via (now static) WithFilter: $r")
+    println(s"for-comprehension guard via WithFilter: $r")
     println(s"Some(1) == Some(1) by state: ${Some(1) == Some(1)}")
   }
 }
