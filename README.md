@@ -70,6 +70,54 @@ The selection is conservative, because a wrong mark fails at load/clinit:
   pre-super region, never set after super, the region is straight-line (no
   branch/switch/try-catch), and the ctor does not delegate via `this(...)`.
 
+The flip is purely access-flag bits plus the version bump — every instruction,
+attribute and StackMapTable byte is left untouched (regenerate with
+[`demo/bytecode-diffs.sh`](demo/bytecode-diffs.sh)):
+
+<!-- bytecode-diff:strict-static -->
+```diff
+# object Obj { val eager; lazy val lazi }  —  module + val statics go strict
+@@ -1,9 +1,9 @@
+ public final class Obj$ implements java.io.Serializable
+-  minor version: 0
+-  major version: 52
+-  flags: (0x0031) ACC_PUBLIC, ACC_FINAL, ACC_SUPER
++  minor version: 65535
++  major version: 71
++  flags: (0x0031) ACC_PUBLIC, ACC_FINAL, ACC_IDENTITY
+   public static final long OFFSET$_m_0;
+-    flags: (0x0019) ACC_PUBLIC, ACC_STATIC, ACC_FINAL
++    flags: (0x0819) ACC_PUBLIC, ACC_STATIC, ACC_FINAL, ACC_STRICT_INIT
+   private static final int eager;
+-    flags: (0x001a) ACC_PRIVATE, ACC_STATIC, ACC_FINAL
++    flags: (0x081a) ACC_PRIVATE, ACC_STATIC, ACC_FINAL, ACC_STRICT_INIT
+   private static int mutableV;
+@@ -13,3 +13,3 @@
+   public static final Obj$ MODULE$;
+-    flags: (0x0019) ACC_PUBLIC, ACC_STATIC, ACC_FINAL
++    flags: (0x0819) ACC_PUBLIC, ACC_STATIC, ACC_FINAL, ACC_STRICT_INIT
+   private Obj$();
+```
+<!-- /bytecode-diff:strict-static -->
+
+<!-- bytecode-diff:strict-instance -->
+```diff
+# case class B(_1: Int)  —  pre-super param accessor goes strict (no promotion)
+@@ -1,7 +1,7 @@
+ public class B extends A implements scala.Product,java.io.Serializable
+-  minor version: 0
+-  major version: 52
+-  flags: (0x0021) ACC_PUBLIC, ACC_SUPER
++  minor version: 65535
++  major version: 71
++  flags: (0x0021) ACC_PUBLIC, ACC_IDENTITY
+   private final int _1;
+-    flags: (0x0012) ACC_PRIVATE, ACC_FINAL
++    flags: (0x0812) ACC_PRIVATE, ACC_FINAL, ACC_STRICT_INIT
+   public static B apply(int);
+```
+<!-- /bytecode-diff:strict-instance -->
+
 A constructor that **branches or guards the pre-super region** would need the new
 `EARLY_LARVAL` StackMapTable frame (`frame_type 246`), which neither ASM nor the
 Classfile API can emit today — such classes are detected and gated out. Param
@@ -108,6 +156,29 @@ Money(100) == Money(100) -> true    (Long-backed, promoted)
 Ratio(1.5) == Ratio(1.5) -> false   (Double-backed: gated, still an identity class)
 ```
 
+The wrapper loses `ACC_IDENTITY` and gains the `value` modifier; its single field
+goes strict:
+
+<!-- bytecode-diff:value-anyval -->
+```diff
+# final class UserId(val raw: Int) extends AnyVal  —  erased wrapper -> value class
+@@ -1,7 +1,7 @@
+-public final class UserId
+-  minor version: 0
+-  major version: 52
+-  flags: (0x0031) ACC_PUBLIC, ACC_FINAL, ACC_SUPER
++public final value class UserId
++  minor version: 65535
++  major version: 71
++  flags: (0x0011) ACC_PUBLIC, ACC_FINAL
+   private final int raw;
+-    flags: (0x0012) ACC_PRIVATE, ACC_FINAL
++    flags: (0x0812) ACC_PRIVATE, ACC_FINAL, ACC_STRICT_INIT
+   public static boolean equals$extension(int, java.lang.Object);
+```
+<!-- /bytecode-diff:value-anyval -->
+
+
 **Case classes opt in with `@ValueClass`** — multi-field promotion is opt-in
 because dropping identity on an arbitrary class is not always sound. The
 `valhalla-annotations` module is a tiny, dependency-free runtime jar; user code
@@ -133,6 +204,31 @@ Circle(5) == Circle(5)         -> true     (value subtype of the abstract value 
 NotAnnotated(1,2) == (1,2)     -> false    (no @ValueClass: stays an identity class)
 Derived extends PlainParent    -> skipped  (superclass is not an abstract value super)
 ```
+
+Each opted-in field goes strict and the class becomes a `value class`:
+
+<!-- bytecode-diff:value-caseclass -->
+```diff
+# @ValueClass final case class Complex(re: Int, im: Int)  —  multi-field opt-in
+@@ -1,9 +1,9 @@
+-public final class Complex implements scala.Product,java.io.Serializable
+-  minor version: 0
+-  major version: 52
+-  flags: (0x0031) ACC_PUBLIC, ACC_FINAL, ACC_SUPER
++public final value class Complex implements scala.Product,java.io.Serializable
++  minor version: 65535
++  major version: 71
++  flags: (0x0011) ACC_PUBLIC, ACC_FINAL
+   private final int re;
+-    flags: (0x0012) ACC_PRIVATE, ACC_FINAL
++    flags: (0x0812) ACC_PRIVATE, ACC_FINAL, ACC_STRICT_INIT
+   private final int im;
+-    flags: (0x0012) ACC_PRIVATE, ACC_FINAL
++    flags: (0x0812) ACC_PRIVATE, ACC_FINAL, ACC_STRICT_INIT
+   public static Complex apply(int, int);
+```
+<!-- /bytecode-diff:value-caseclass -->
+
 
 **What gets gated, and why.** The eligibility filter is what keeps this sound; it
 leaves a class alone (clear reason logged) when promotion would be wrong or fail
@@ -192,6 +288,47 @@ to `Option.withFilter`) still works with `WithFilter` left non-static:
 value-class-list=scala.Option,scala.Some
 -> Some(1) == Some(1) is true;  `for (x <- Some(21) if x > 0) yield x*2` -> Some(42)
 ```
+
+`Option` becomes an abstract value super and `Some` a value class — and note the
+nested-class fix: `Option`'s `WithFilter` `InnerClasses` entry gains `IDENTITY`
+(`0x0001 PUBLIC` → `0x0021 PUBLIC, IDENTITY`) automatically, matching javac:
+
+<!-- bytecode-diff:value-config -->
+```diff
+# config-driven (config/scala-stdlib.conf): a stdlib type you cannot annotate
+@@ -1,5 +1,5 @@
+-public abstract class scala.Option<A extends java.lang.Object> extends java.lang.Object implements scala.collection.IterableOnce<A>, scala.Product, java.io.Serializable
+-  minor version: 0
+-  major version: 52
+-  flags: (0x0421) ACC_PUBLIC, ACC_SUPER, ACC_ABSTRACT
++public abstract value class scala.Option<A extends java.lang.Object> extends java.lang.Object implements scala.collection.IterableOnce<A>, scala.Product, java.io.Serializable
++  minor version: 65535
++  major version: 71
++  flags: (0x0401) ACC_PUBLIC, ACC_ABSTRACT
+   private static final long serialVersionUID;
+@@ -84,3 +84,3 @@
+     flags: (0x0001) ACC_PUBLIC
+-    flags: (0x0001) PUBLIC
++    flags: (0x0021) PUBLIC, IDENTITY
+     flags: (0x0011) PUBLIC, FINAL
+@@ -1,5 +1,5 @@
+-public final class scala.Some<A extends java.lang.Object> extends scala.Option<A>
+-  minor version: 0
+-  major version: 52
+-  flags: (0x0031) ACC_PUBLIC, ACC_FINAL, ACC_SUPER
++public final value class scala.Some<A extends java.lang.Object> extends scala.Option<A>
++  minor version: 65535
++  major version: 71
++  flags: (0x0011) ACC_PUBLIC, ACC_FINAL
+   private static final long serialVersionUID;
+@@ -7,3 +7,3 @@
+   private final A value;
+-    flags: (0x0012) ACC_PRIVATE, ACC_FINAL
++    flags: (0x0812) ACC_PRIVATE, ACC_FINAL, ACC_STRICT_INIT
+   public static <A extends java.lang.Object> scala.Option<A> unapply(scala.Some<A>);
+```
+<!-- /bytecode-diff:value-config -->
+
 
 ## Usage
 
