@@ -12,36 +12,30 @@
 > transform only flips access-flag bits on classes/fields that already satisfy
 > the invariant and stamps the preview classfile version.
 
-## Executive summary
+## What it does
 
 Scala already emits bytecode that *happens* to satisfy several Valhalla
 invariants — module/`val` statics are assigned in `<clinit>`, constructor param
-accessors are written before `super()`, and `AnyVal` wrappers (plus many case
-classes) are effectively final with only `val` fields. This project ships a
-small ASM-based agent (usable load-time **or** build-time) plus a tiny
-dependency-free opt-in annotation library that turn that latent compliance into
-the real thing, in three layered phases. Where the invariant does *not* hold —
-a `var` param, a `var` introduced in the body, or mutable inherited state — the
-eligibility filter detects it (no non-`final` field, `Object` superclass, every
-field set before `super()`) and leaves the class alone:
+accessors are written before `super()`, and `AnyVal` wrappers and many case
+classes are effectively final with only `val` fields. A small ASM-based agent
+(usable **load-time** via `-javaagent` or **build-time** as an offline rewriter)
+turns that latent compliance into the real thing. It does three things:
 
-- **Phase 0 — strict fields.** Set `ACC_STRICT_INIT` (`0x0800`) on static and
-  pre-`super()` instance fields that are provably assigned, so the JVM verifies
-  and enforces them. Zero StackMapTable work for the supported shapes.
-- **Phase 1 — `AnyVal` → value class.** Detect an *erased* `extends AnyVal`
-  class (structurally — `AnyVal` is not a real superclass after erasure) and
-  clear `ACC_IDENTITY` to make it a real `value class`.
-- **Phase 2 — `@ValueClass` case classes → value class.** An opt-in annotation
-  promotes a final case class of final fields, marking every field strict.
+1. **Enforces strict fields.** Sets `ACC_STRICT_INIT` on fields that are provably
+   assigned in time, so the JVM verifies and enforces it natively.
+2. **Promotes value classes.** Turns an erased `AnyVal` wrapper, or a case class
+   you opt in with `@ValueClass`, into a real JEP 401 `value class` (identity
+   removed; `==` compares by state).
+3. **Retrofits library types you can't edit** — `scala.util.Left`/`Right`,
+   `scala.Some`, … — driven by an external config instead of an annotation.
 
-Everything is verified end-to-end on the JEP 401 EA JDK under `-Xverify:all`:
-strict fields are enforced (a field set after `super()` fails with `VerifyError`),
-and promoted value classes compare `==` **by state**. The transform is
-deliberately minimal and **sound** — a wrong mark fails loudly at load, never
-silently — and floating-point fields are gated by default because value-class
-`==` (acmp) inverts `NaN`/signed-zero relative to numeric `==`. See
-[docs/value-class-mapping.md](docs/value-class-mapping.md) for the full mapping,
-the `equals`/`hashCode`/`toString` gap analysis, and the detection design.
+Everything is verified end-to-end on the JEP 401 EA JDK under `-Xverify:all`. The
+transform is deliberately minimal and **sound**: it only marks what genuinely
+qualifies and gates the rest with a precise reason, so a mistake fails loudly at
+load rather than silently changing behaviour. Every instruction, attribute and
+StackMapTable byte is left untouched. See
+[docs/value-class-mapping.md](docs/value-class-mapping.md) for the full design,
+the `equals`/`hashCode`/`toString` gap analysis, and the detection rules.
 
 ## Prerequisites
 
@@ -54,72 +48,150 @@ the `equals`/`hashCode`/`toString` gap analysis, and the detection design.
 - **JDK 21+ to build** the agent (any vendor; enforced by maven-enforcer).
 - **Scala 3 (`scalac`) and coursier (`cs`)** on `PATH` for the demos.
 
-## Why
+## Strict field initialization
 
-JEP 401 adds strict field initialization: a field flagged `ACC_STRICT_INIT`
-(`0x0800`) must be assigned before it can leak — for static fields, by the time
-`<clinit>` completes; for instance fields, before the super-constructor call.
-Scala already emits bytecode that *happens* to obey this for two populations:
-
-- **eager object/static fields** — `MODULE$`, eager `val`s, lazy-val offsets are
-  `static final` and unconditionally `putstatic`'d at the top of `<clinit>`;
-- **constructor param accessors** — a `case class B(_1)` writes `_1` with a
-  `putfield` on `this` *before* the super `invokespecial`, on a straight line.
-
-So no helpers, no codegen — just set `0x0800` on the fields that already qualify
-and let the JVM verify/enforce it.
-
-## The two populations, and why they're each easy
+JEP 401 lets a field be flagged `ACC_STRICT_INIT` (`0x0800`): it must be assigned
+before it can leak — for static fields, by the time `<clinit>` completes; for
+instance fields, before the super-constructor call. Scala already emits bytecode
+that obeys this for two populations, so the retrofit is just a flag flip:
 
 | Population | Enforcement | StackMapTable work |
 |---|---|---|
 | Object/static fields (`MODULE$`, eager `val`) | dynamic, at `<clinit>` completion | none |
-| Pre-super instance fields (param accessors) | verifier, before `super()` | none — straight-line ctor has no frame in the pre-super region |
+| Pre-super instance fields (param accessors) | verifier, before `super()` | none — a straight-line ctor has no frame in the pre-super region |
 
-The one thing neither ASM nor the Classfile API can emit today is the new
-`EARLY_LARVAL` StackMapTable frame (`frame_type 246`), needed only when a
-constructor **branches or guards the pre-super region**. Param-accessor ctors
-never hit it; such classes are detected and gated out (their instance fields are
-left unmarked).
+The selection is conservative, because a wrong mark fails at load/clinit:
 
-## Selection filters (kept sound — a wrong mark fails at load/clinit, not silently)
+- **Static:** `ACC_STATIC && ACC_FINAL`, no `ConstantValue` attribute, and
+  definitely-assigned by a `putstatic` in the **entry straight-line block** of
+  `<clinit>` (before the first branch). Catches `MODULE$` / eager vals / lazy-val
+  offsets; excludes `var`s and lazy backing fields for free.
+- **Instance:** across **every** `<init>`, the field is `putfield`-set in the
+  pre-super region, never set after super, the region is straight-line (no
+  branch/switch/try-catch), and the ctor does not delegate via `this(...)`.
 
-**Static:** `ACC_STATIC && ACC_FINAL`, no `ConstantValue` attribute, and
-definitely-assigned by a `putstatic` in the **entry straight-line block** of
-`<clinit>` (before the first branch — guaranteed to run). Catches `MODULE$` /
-eager vals / lazy-val offsets; excludes `var`s and lazy backing fields for free.
+A constructor that **branches or guards the pre-super region** would need the new
+`EARLY_LARVAL` StackMapTable frame (`frame_type 246`), which neither ASM nor the
+Classfile API can emit today — such classes are detected and gated out. Param
+accessors never hit it.
 
-**Instance:** across **every** `<init>`, the field is `putfield`-set in the
-pre-super region (intersection), never set after super, the pre-super region is
-straight-line (no branch/switch/try-catch), and the ctor does not delegate via
-`this(...)`. Anything else gates the class's instance fields out.
-
-## Key empirical finding (beyond the original sketch)
-
-The preview gate is stricter than "bump the minor to `0xFFFF`": a class with
-`minor == 0xFFFF` is **rejected** unless its `major` also equals the running
-JVM's latest. Verified on the JEP 401 EA build:
-
-```
-69.65535  -> UnsupportedClassVersionError: ... only recognizes preview features
-             for class file version 71.65535
-71.65535  -> loads
-```
-
-Scala emits major 52 (Java 8) by default, so the transform must bump
-`major` to the JVM's latest (derived at runtime as `feature + 44`, e.g. 27 → 71)
-in addition to setting `minor = 0xFFFF` and OR-ing `0x0800`. That's the whole
-rewrite; every instruction, attribute and StackMapTable byte is untouched.
-
-## Enforcement is real, not silently ignored
-
-A negative test (`demo/neg`) generates the *same* class twice — once with the
-strict bit, once without — each writing its field **after** `super()`:
+**It really enforces.** A negative test (`demo/neg`) builds the *same* class
+twice, each writing its field **after** `super()`:
 
 ```
 BadPlain  (no strict bit)  -> loads + constructs fine
 BadStrict (0x0800 set)     -> VerifyError: All strict final fields must be
                               initialized before super(): 1 field(s), x:I
+```
+
+**One non-obvious detail:** the preview gate is stricter than "set the minor to
+`0xFFFF`" — the class's `major` must *also* equal the running JVM's latest, or it
+is rejected (`69.65535` fails; `71.65535` loads). Scala emits major 52, so the
+transform bumps major to the JVM's latest (`feature + 44`, e.g. 27 → 71) as well.
+
+## Value classes
+
+A value class is just a class with the `ACC_IDENTITY` bit (`0x0020`) cleared
+(`final value class` = `0x0010`, vs a normal class's `0x0021`). Promotion clears
+that bit, marks the instance fields strict + final, and stamps the preview
+version. Value objects have no identity, so `==`/acmp compares **by state**.
+
+**Erased `AnyVal` wrappers** are detected structurally — `AnyVal` is not a real
+superclass after erasure (the backend rewrites it to `java/lang/Object` and the
+name survives nowhere), so the tell is the SIP-15 `$extension` fingerprint: a
+`public static name$extension(<underlying>, …)` whose first parameter is the
+single field's type.
+
+```
+UserId(5) == UserId(5)   -> true    (Int-backed, promoted: == is by state)
+Money(100) == Money(100) -> true    (Long-backed, promoted)
+Ratio(1.5) == Ratio(1.5) -> false   (Double-backed: gated, still an identity class)
+```
+
+**Case classes opt in with `@ValueClass`** — multi-field promotion is opt-in
+because dropping identity on an arbitrary class is not always sound. The
+`valhalla-annotations` module is a tiny, dependency-free runtime jar; user code
+depends only on it, while the agent reads the annotation by descriptor (the two
+are decoupled).
+
+```scala
+import au.id.zaugg.valhalla.ValueClass
+
+@ValueClass final case class Complex(re: Int, im: Int)
+@ValueClass(allowFloating = true) final case class Vec2(x: Double, y: Double)
+
+// A value class may extend an abstract value super class, which JEP 401
+// requires to be stateless (zero instance fields):
+@ValueClass sealed abstract class Shape
+@ValueClass final case class Circle(r: Int) extends Shape
+@ValueClass final case class Rect(w: Int, h: Int) extends Shape
+```
+
+```
+Complex(1,2) == Complex(1,2)   -> true     (== by state; toString/equals retained)
+Circle(5) == Circle(5)         -> true     (value subtype of the abstract value class Shape)
+NotAnnotated(1,2) == (1,2)     -> false    (no @ValueClass: stays an identity class)
+Derived extends PlainParent    -> skipped  (superclass is not an abstract value super)
+```
+
+**What gets gated, and why.** The eligibility filter is what keeps this sound; it
+leaves a class alone (clear reason logged) when promotion would be wrong or fail
+to load:
+
+- a `var` param, a body `var`, or mutable inherited state → not all fields are
+  `final` and set before `super()`;
+- a `float`/`double` field → value `==`/acmp is *bitwise*, which inverts `NaN`
+  (acmp says `NaN == NaN`) and signed-zero (acmp says `+0.0 != -0.0`) vs Scala
+  numeric `==`; off by default, opt in per type or globally;
+- a non-`Object` superclass that isn't an abstract **stateless** value super
+  (checked recursively up the whole chain) — a value class may not extend an
+  identity class;
+- enclosing a **non-static inner member class** — an enclosing value instance has
+  no identity to capture.
+
+When promoting, the agent also fixes `InnerClasses` flags so identity nested
+classes carry `ACC_IDENTITY`, exactly as javac does.
+
+## Retrofitting library classes you can't annotate
+
+For types you can't edit, the agent takes an external config (a `.properties`
+file or inline options) instead of the annotation:
+
+- **value-class list** — names treated exactly as `@ValueClass`. A concrete entry
+  is promoted; an **abstract** entry becomes a stateless value super class (list a
+  leaf's abstract super here too).
+- **finalize list** — add `ACC_FINAL` to named classes: "the author forgot
+  `final` but I know it has no subclasses" — finalize, then promote.
+- **allow-non-final** — a blanket version of the above that skips the not-final
+  gate (promotion finalizes anyway).
+- **staticize-inner** — convert a named non-static inner class to static (flip
+  `ACC_STATIC` on its `InnerClasses` entries), unblocking its enclosing class.
+
+```
+-javaagent:strict-init-retrofit.jar=valueclass;config=config/scala-stdlib.conf
+# offline:
+Rewriter --config config/scala-stdlib.conf <classes> <out>
+Rewriter --value-classes-list a,b --finalize a,b --allow-non-final <classes> <out>
+```
+
+Pointed at the real `scala-library`, it promotes what is genuinely sound and
+gives a precise reason for the rest:
+
+```
+scala.util.Either -> abstract value super;  Left/Right -> value classes   (Left(e)==Left(e) is true)
+Range / Range.Inclusive / .Exclusive        -> skipped   (Range is stateful; a value super must be stateless)
+scala.Option / scala.Some                   -> skipped   (Option encloses the non-static inner WithFilter)
+```
+
+That last one is fixable: `Option$WithFilter` already takes its outer `Option` as
+an explicit constructor argument, so converting it to a static inner needs no code
+change — just `staticize-inner=scala.Option$WithFilter`. With that, `Option`
+becomes an abstract value super and `Some` a value class, and a `for`-comprehension
+guard (which compiles to `Option.withFilter`) still works:
+
+```
+value-class-list=scala.Option,scala.Some;staticize-inner=scala.Option$WithFilter
+-> Some(1) == Some(1) is true;  `for (x <- Some(21) if x > 0) yield x*2` -> Some(42)
 ```
 
 ## Usage
@@ -128,148 +200,24 @@ Load-time agent:
 
 ```
 java --enable-preview \
-     -javaagent:agent/target/strict-init-retrofit.jar="include=Obj,A,B;verbose" \
+     -javaagent:agent/target/strict-init-retrofit.jar="valueclass;include=Obj,A,B;verbose" \
      -cp <app> MainClass
 ```
 
-Agent options (`;`-separated): `include=<prefix,prefix>` (internal names; `.` or
-`/` accepted; default = all non-bootstrap classes), `verbose`,
-`valueclass` (enable Phase-1 value-class promotion, below), `allow-floating`.
+Agent options (`;`-separated): `include=<prefix,…>` (internal names; `.` or `/`,
+default = all non-bootstrap classes), `verbose`, `valueclass` (enable value-class
+promotion), `allow-floating`, `allow-non-final`, `value-class-list=…`,
+`finalize=…`, `staticize-inner=…`, `config=<file>`.
 
 Offline post-processor (rewrite a classes dir, then inspect with `javap` /
 re-verify with `-Xverify:all`):
 
 ```
-java -cp agent/target/strict-init-retrofit.jar \
-     au.id.zaugg.strictinit.Rewriter [--value-classes] [--allow-floating] <classesDir> [outDir]
+java -cp agent/target/strict-init-retrofit.jar au.id.zaugg.strictinit.Rewriter \
+     [--value-classes] [--allow-floating] [--allow-non-final] \
+     [--value-classes-list a,b] [--finalize a,b] [--staticize-inner a,b] \
+     [--config file] <classesDir> [outDir]
 ```
-
-## Phase 1: promoting `extends AnyVal` to real value classes
-
-With `valueclass` / `--value-classes`, the agent also promotes an *erased* Scala
-`extends AnyVal` value class to a JEP 401 `value class`. The rewrite clears
-`ACC_IDENTITY` (0x0020) on the class — a value class is exactly a class *without*
-that bit (`final value class` = `0x0010`, vs a normal class's `0x0021`) — marks
-the single underlying field strict+final, and stamps the preview version.
-
-`AnyVal` is not a real superclass after erasure (the backend rewrites it to
-`java/lang/Object` and the name survives nowhere), so detection is structural:
-the SIP-15 `$extension` fingerprint — a `public static name$extension(<underlying>,
-…)` method whose first parameter is the underlying field's type. See
-[docs/value-class-mapping.md](docs/value-class-mapping.md).
-
-**Floating-point underlyings are gated out by default.** Value `==`/acmp is
-bitwise substitutability, which *inverts* `NaN` (acmp says `NaN == NaN`) and
-signed-zero (acmp says `+0.0 != -0.0`) relative to Scala numeric `==`. Pass
-`allow-floating` / `--allow-floating` to override, accepting the changed
-semantics. Result, verified on the EA JVM (two distinct allocations):
-
-```
-UserId(5) == UserId(5)   -> true    (Int-backed, promoted: == is by state)
-Money(100) == Money(100) -> true    (Long-backed, promoted)
-Ratio(1.5) == Ratio(1.5) -> false   (Double-backed: gated, still an identity class)
-```
-
-## Phase 2: opting case classes in with `@ValueClass`
-
-Multi-field promotion is **opt-in**, because dropping identity on an arbitrary
-class is not always sound. The `valhalla-annotations` module (a tiny,
-dependency-free runtime jar) provides the marker:
-
-```scala
-import au.id.zaugg.valhalla.ValueClass
-
-@ValueClass final case class Complex(re: Int, im: Int)
-@ValueClass(allowFloating = true) final case class Vec2(x: Double, y: Double)
-
-// A value class may extend an abstract @ValueClass "value super class",
-// which JEP 401 requires to be stateless (zero instance fields):
-@ValueClass sealed abstract class Shape
-@ValueClass final case class Circle(r: Int) extends Shape
-@ValueClass final case class Rect(w: Int, h: Int) extends Shape
-```
-
-The agent (in `valueclass` mode) promotes an annotated **final class of final
-fields** whose fields are all set before `super()`, marking *every* field
-strict. `@ValueClass` is `RUNTIME`-retained so the agent reads it from
-`RuntimeVisibleAnnotations`; the per-type `allowFloating` element lifts the
-`float`/`double` gate for that class only.
-
-**Superclass rule (JEP 401).** A value class may only extend `Object` or an
-**abstract `@ValueClass`** class that is itself stateless. On an abstract class
-the annotation marks a *value super class*: it must have zero instance fields
-(the agent verifies this, and resolves a non-`Object` superclass's bytes to
-validate the whole chain up to `Object`). A case class extending a non-annotated
-or stateful parent is therefore excluded — promoting it would make a value class
-extend an identity class. Ineligible or un-annotated classes are left as
-identity classes (still strict-init'd). Verified on the EA JVM:
-
-```
-Complex(1,2) == Complex(1,2)   -> true     (annotated, promoted: == by state; toString/equals retained)
-Mixed(7,true) == Mixed(7,true) -> true     (Long + Boolean, promoted)
-Circle(5) == Circle(5)         -> true     (value subtype of the abstract value class Shape)
-NotAnnotated(1,2) == (1,2)     -> false    (no @ValueClass: stays an identity class)
-Derived extends PlainParent    -> skipped  (superclass is not an abstract @ValueClass)
-```
-
-User code depends only on `valhalla-annotations`; the agent jar pulls in ASM
-but reads the annotation by descriptor, so the two are decoupled.
-
-## Retrofitting classes you cannot annotate (config)
-
-For library types you can't edit — `scala.util.Left`/`Right`, etc. — the agent
-takes an external config instead of the annotation. Three mechanisms:
-
-- **value-class list** — internal names treated exactly as `@ValueClass`. A
-  concrete entry is promoted; an **abstract** entry becomes a stateless *value
-  super class*. List a leaf's abstract super here too (the JVM forbids a value
-  class from extending an identity class).
-- **finalize list** — add `ACC_FINAL` to named classes. The "the author forgot
-  `final` but I know it has no subclasses" case: finalize, then promote.
-- **allow-non-final** — a blanket mode that skips the not-final gate (promotion
-  finalizes anyway), as an alternative to listing each class.
-- **staticize-inner** — convert a non-static inner class to static (flip
-  `ACC_STATIC` on its `InnerClasses` entries everywhere), so its enclosing class
-  is no longer blocked from becoming a value class.
-
-Via a `.properties` file ([config/scala-stdlib.conf](config/scala-stdlib.conf))
-or inline agent options:
-
-```
--javaagent:strict-init-retrofit.jar=valueclass;config=config/scala-stdlib.conf
--javaagent:strict-init-retrofit.jar=valueclass;value-class-list=scala.util.Either,scala.util.Left,scala.util.Right
-# offline:
-Rewriter --config config/scala-stdlib.conf <classes> <out>
-Rewriter --value-classes-list a,b --finalize a,b --allow-non-final <classes> <out>
-```
-
-Running this against the real `scala-library` is instructive — the agent only
-promotes what is genuinely sound and **gates the rest with a precise reason**:
-
-```
-scala.util.Either -> abstract value class;  Left/Right -> value classes   (Left(e)==Left(e) is true)
-scala.Option / scala.Some -> skipped   (Option encloses the non-static inner WithFilter)
-Range / Range.Inclusive / .Exclusive  -> skipped   (Range has instance fields; a value super must be stateless)
-```
-
-`scala.Option`/`Some` *become* promotable once `Option$WithFilter` is converted
-to a static inner with **staticize-inner** — `WithFilter` already takes its outer
-`Option` as an explicit constructor argument, so flipping `ACC_STATIC` on its
-`InnerClasses` entries needs no code change. With that, `Option` becomes an
-abstract value super and `Some` a value class; a `for`-comprehension guard (which
-compiles to `Option.withFilter`) still works:
-
-```
--javaagent:strict-init-retrofit.jar=valueclass;value-class-list=scala.Option,scala.Some;staticize-inner=scala.Option$WithFilter
--> Some(1) == Some(1) is true;  `for (x <- Some(21) if x > 0) yield x*2` -> Some(42)
-```
-
-Two JEP 401 constraints the validator enforces (both verified against the EA
-JVM, then gated rather than producing an unloadable class): a value class may
-only extend `Object` or an abstract **stateless** value super class (checked up
-the whole chain), and a value class may **not enclose a non-static inner member
-class**. When promoting, the agent also fixes `InnerClasses` flags so identity
-nested classes carry `ACC_IDENTITY`, as javac does.
 
 ## Benchmarks
 
@@ -307,10 +255,10 @@ the [benchmarks README](benchmarks/README.md) for the full tables.
 
 ```
 mvn -DskipTests package          # builds annotations + agent + benchmarks
-./demo/run.sh                     # phase 0: scalac -> agent -> preview JVM, + negative test
-./demo/run-value-classes.sh       # phase 1: promote AnyVal -> value class, offline + agent
-./demo/run-case-classes.sh        # phase 2: @ValueClass case classes -> value class
-./demo/run-config-classes.sh      # config: promote stdlib Either/Left/Right (no annotation)
+./demo/run.sh                     # strict fields: scalac -> agent -> preview JVM, + negative test
+./demo/run-value-classes.sh       # AnyVal wrappers -> value classes, offline + agent
+./demo/run-case-classes.sh        # @ValueClass case classes (incl. an abstract value-super hierarchy)
+./demo/run-config-classes.sh      # config-driven: stdlib Either/Left/Right and Option/Some
 ./benchmarks/run.sh               # JMH: value vs reference, allocation profiler
 ```
 
@@ -323,18 +271,17 @@ mvn -DskipTests package          # builds annotations + agent + benchmarks
 - `benchmarks/` — `au.id.zaugg:valhalla-benchmarks`, JMH allocation benchmarks
   (value class vs reference case class).
 
-The demo expects the JEP 401 EA JDK at `jdk/jdk-27.jdk/Contents/Home` (override
-with `JAVA_HOME_PREVIEW`) and `cs` (coursier) on `PATH` for the Scala library.
+## Notes / limitations
 
-## Notes / limitations (v1)
-
-- Stock ASM (9.10.1) suffices — `STRICT_INIT` is just an access bit and the
-  preview minor packs into the version int; ASM never has to understand the flag.
-  No Valhalla-preview build of ASM is required.
+- Stock ASM (9.10.1) suffices — `STRICT_INIT` and the value-class marker are just
+  access bits and the preview minor packs into the version int; ASM never has to
+  understand them. No Valhalla-preview build of ASM is required.
 - Constructors that branch / guard the pre-super region are gated out pending
   `EARLY_LARVAL` frame emission support.
-- The agent only rewrites classes that gain ≥1 strict field; everything else is
-  passed through untouched (mixed preview / non-preview classpaths are fine).
+- JEP 401 delivers identity removal and on-stack scalarization, not a scalarized
+  value calling convention or array/heap flattening (those need the follow-on
+  null-restricted JEPs) — so promotion helps the scalarizable cases and is
+  neutral-to-negative where the value escapes. See the benchmarks.
 
 ## License
 
